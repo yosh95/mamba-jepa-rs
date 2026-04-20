@@ -64,9 +64,6 @@ fn main() {
     let initial_obs = Tensor::<MyBackend, 3>::from_data(
         burn::tensor::TensorData::new(vec![1.0, 0.0], [1, 1, 2]), &device
     );
-    let initial_act = Tensor::<MyBackend, 3>::from_data(
-        burn::tensor::TensorData::new(vec![0.0, 0.1], [1, 1, 2]), &device
-    );
 
     // 2. Encode to get initial latent and internal state
     let z_start = model_valid.encoder.forward(initial_obs);

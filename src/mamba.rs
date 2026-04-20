@@ -104,8 +104,6 @@ impl<B: Backend> MambaBlock<B> {
         x: Tensor<B, 2>,
         prev_h: ComplexTensor<B, 3>,
     ) -> (Tensor<B, 2>, ComplexTensor<B, 3>) {
-        let device = &x.device();
-        
         // 1. Input Projection
         let projected = self.in_proj.forward(x);
         let mut chunks = projected.chunk(2, 1);
