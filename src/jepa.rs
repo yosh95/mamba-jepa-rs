@@ -8,6 +8,7 @@ use burn::tensor::Tensor;
 pub struct JepaState<B: Backend> {
     pub h: Tensor<B, 4>,
     pub prev_bx: Tensor<B, 4>,
+    pub conv_state: Tensor<B, 3>,
 }
 
 #[derive(Module, Debug)]
@@ -68,13 +69,16 @@ impl<B: Backend> JepaWorldModel<B> {
         let u_concat = Tensor::cat(vec![z_prev, a], 1);
         let u = self.fusion.forward(u_concat);
 
-        let (y, next_h, current_bx) = self.mamba.forward_step(u, state.h, Some(state.prev_bx));
+        let (y, next_h, current_bx, next_conv_state) =
+            self.mamba
+                .forward_step(u, state.h, Some(state.prev_bx), Some(state.conv_state));
 
         (
             y,
             JepaState {
                 h: next_h,
                 prev_bx: current_bx,
+                conv_state: next_conv_state,
             },
         )
     }
@@ -130,11 +134,11 @@ pub fn sigreg_loss<B: Backend>(z: Tensor<B, 3>, n_projections: usize) -> Tensor<
             .mul_scalar(-0.25)
             .exp()
             .mean()
-            .mul_scalar(2.0 * 2.0f32.sqrt());
+            .mul_scalar(2.0 * 2.0f64.sqrt());
 
-        let tm = term1 - term2 + (1.0 / 3.0f32.sqrt());
+        let tm = term1 - term2 + (1.0 / 3.0f64.sqrt());
         total_t = total_t + tm.powf_scalar(2.0).unsqueeze();
     }
 
-    total_t / (n_projections as f32)
+    total_t / (n_projections as f64)
 }

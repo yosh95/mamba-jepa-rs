@@ -42,6 +42,12 @@ pub struct MambaBlock<B: Backend> {
 
 impl<B: Backend> MambaBlock<B> {
     pub fn new(config: &MambaConfig, device: &B::Device) -> Self {
+        assert!(
+            config.d_state.is_multiple_of(2),
+            "d_state must be even for complex/rotation logic (d_state={})",
+            config.d_state
+        );
+
         let d_inner = config.d_model * config.expand;
         let d_state = config.d_state;
         let n_heads = config.n_heads;
@@ -54,7 +60,7 @@ impl<B: Backend> MambaBlock<B> {
             Some(
                 Conv1dConfig::new(d_inner, d_inner, config.conv_kernel)
                     .with_groups(d_inner)
-                    .with_padding(burn::nn::PaddingConfig1d::Same)
+                    .with_padding(burn::nn::PaddingConfig1d::Valid)
                     .init(device),
             )
         } else {
@@ -104,7 +110,7 @@ impl<B: Backend> MambaBlock<B> {
     }
 
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let [batch, seq_len, _d_model] = x.dims();
+        let [batch, _seq_len, _d_model] = x.dims();
         let projected = self.in_proj.forward(x);
         let mut chunks = projected.chunk(2, 2);
         let u_orig = chunks.remove(0);
@@ -112,9 +118,16 @@ impl<B: Backend> MambaBlock<B> {
 
         let mut u = u_orig;
         if let Some(conv) = &self.conv1d {
+            let kernel_size = conv.weight.dims()[2];
             u = u.swap_dims(1, 2);
+            u = Tensor::cat(
+                vec![
+                    Tensor::zeros([batch, self.d_inner, kernel_size - 1], &u.device()),
+                    u,
+                ],
+                2,
+            );
             u = conv.forward(u);
-            u = u.slice([0..batch, 0..self.d_inner, 0..seq_len]);
             u = u.swap_dims(1, 2);
         }
 
@@ -152,7 +165,6 @@ impl<B: Backend> MambaBlock<B> {
 
         let delta = delta.reshape([batch, seq_len, n_heads, d_head]);
         let lambda = lambda.reshape([batch, seq_len, n_heads, d_head]);
-        let _theta = theta.reshape([batch, seq_len, n_heads, d_head]);
         let u = u.reshape([batch, seq_len, n_heads, d_head]);
 
         let b = b.reshape([batch, seq_len, n_heads, mimo_rank, d_state])
@@ -199,7 +211,13 @@ impl<B: Backend> MambaBlock<B> {
             .unsqueeze_dim::<5>(4)
             * dt_u;
 
-        let angle = da_im.mean_dim(3).squeeze::<4>(3); // [B, L, H, D_m]
+        let theta_rs = theta.reshape([batch, seq_len, n_heads, d_head]);
+        let theta_mimo = theta_rs
+            .reshape([batch, seq_len, n_heads, mimo_rank, d_head_mimo])
+            .mean_dim(3)
+            .squeeze::<4>(3);
+
+        let angle = da_im.mean_dim(3).squeeze::<4>(3) + theta_mimo; // [B, L, H, D_m]
         let cos = angle.clone().cos().unsqueeze_dim::<5>(3);
         let sin = angle.sin().unsqueeze_dim::<5>(3);
 
@@ -327,16 +345,33 @@ impl<B: Backend> MambaBlock<B> {
         x: Tensor<B, 2>,
         prev_h: Tensor<B, 4>,
         prev_bx: Option<Tensor<B, 4>>,
-    ) -> (Tensor<B, 2>, Tensor<B, 4>, Tensor<B, 4>) {
+        conv_state: Option<Tensor<B, 3>>,
+    ) -> (Tensor<B, 2>, Tensor<B, 4>, Tensor<B, 4>, Tensor<B, 3>) {
         let projected = self.in_proj.forward(x);
         let mut chunks = projected.chunk(2, 1);
         let u_orig = chunks.remove(0);
         let evo_gate = chunks.remove(0);
 
-        let u_silu = burn::tensor::activation::silu(u_orig);
+        let (u_conv, next_conv_state) = if let Some(conv) = &self.conv1d {
+            let [batch, d_inner] = u_orig.dims();
+            let kernel_size = conv.weight.dims()[2];
+            let current_conv_state = conv_state.unwrap_or_else(|| {
+                Tensor::zeros([batch, d_inner, kernel_size - 1], &u_orig.device())
+            });
+            let x_conv = Tensor::cat(vec![current_conv_state, u_orig.unsqueeze_dim::<3>(2)], 2);
+            let next_state = x_conv.clone().slice([0..batch, 0..d_inner, 1..kernel_size]);
+            let out = conv.forward(x_conv).squeeze::<2>(2);
+            (out, next_state)
+        } else {
+            let device = u_orig.device();
+            (u_orig, Tensor::zeros([1, 1, 1], &device))
+        };
+
+        let u_silu = burn::tensor::activation::silu(u_conv);
 
         let delta = burn::tensor::activation::softplus(self.dt_proj.forward(u_silu.clone()), 1.0);
         let lambda = burn::tensor::activation::sigmoid(self.lambda_proj.forward(u_silu.clone()));
+        let theta = self.theta_proj.forward(u_silu.clone());
 
         let b = self.b_proj.forward(u_silu.clone());
         let c = self.c_proj.forward(u_silu.clone());
@@ -351,12 +386,17 @@ impl<B: Backend> MambaBlock<B> {
         let u_rs = u_silu.reshape([batch, n_heads, d_head]);
         let dt_rs = delta.reshape([batch, n_heads, d_head]);
         let la_rs = lambda.reshape([batch, n_heads, d_head]);
+        let theta_rs = theta.reshape([batch, n_heads, d_head]);
 
         let dt_t = dt_rs
             .reshape([batch, n_heads, mimo_rank, d_head_mimo])
             .mean_dim(2)
             .squeeze::<3>(2);
         let la_t = la_rs
+            .reshape([batch, n_heads, mimo_rank, d_head_mimo])
+            .mean_dim(2)
+            .squeeze::<3>(2);
+        let theta_t = theta_rs
             .reshape([batch, n_heads, mimo_rank, d_head_mimo])
             .mean_dim(2)
             .squeeze::<3>(2);
@@ -379,7 +419,7 @@ impl<B: Backend> MambaBlock<B> {
             * (Tensor::ones_like(&la_t) - la_t).unsqueeze_dim::<4>(2)
             * da_re.clone();
 
-        let h_rot = self.rotate_state(prev_h, da_im.clone().mean_dim(2).squeeze::<3>(2));
+        let h_rot = self.rotate_state(prev_h, (da_im.mean_dim(2).squeeze::<3>(2)) + theta_t);
         let h_next = da_re * h_rot
             + gamma_t * current_bx.clone()
             + beta_t * prev_bx.unwrap_or_else(|| Tensor::zeros_like(&current_bx));
@@ -391,6 +431,6 @@ impl<B: Backend> MambaBlock<B> {
         let y = y * burn::tensor::activation::silu(evo_gate);
         let out = self.out_proj.forward(y);
 
-        (out, h_next, current_bx)
+        (out, h_next, current_bx, next_conv_state)
     }
 }

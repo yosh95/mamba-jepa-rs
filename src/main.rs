@@ -41,11 +41,14 @@ fn main() {
         let mut act_vec = Vec::new();
 
         for b in 0..batch_size {
-            let offset = (b as f32) * 0.5;
+            let offset = (b as f32) * 0.5 + (epoch as f32) * 0.01; // Vary data each epoch
             for t in 0..seq_len {
                 let angle = (t as f32) * 0.3 + offset;
-                obs_vec.extend_from_slice(&[angle.cos(), angle.sin()]);
-                act_vec.extend_from_slice(&[-(angle.sin()) * 0.1, angle.cos() * 0.1]);
+                let noise_obs = (rand::random::<f32>() - 0.5) * 0.01;
+                let noise_act = (rand::random::<f32>() - 0.5) * 0.01;
+                
+                obs_vec.extend_from_slice(&[angle.cos() + noise_obs, angle.sin() + noise_obs]);
+                act_vec.extend_from_slice(&[-(angle.sin()) * 0.1 + noise_act, angle.cos() * 0.1 + noise_act]);
             }
         }
 
@@ -107,6 +110,7 @@ fn main() {
             ],
             &device,
         ),
+        conv_state: Tensor::zeros([batch_size, d_inner, config.conv_kernel - 1], &device),
     };
 
     println!("Starting imagination from z[0]...");

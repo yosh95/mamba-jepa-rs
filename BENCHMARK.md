@@ -28,8 +28,8 @@ The benchmark measures the time taken for a full training step (Forward pass, Lo
 
 | Backend | Total Time (5 Epochs) | Avg Time per Epoch | Speedup |
 | :--- | :--- | :--- | :--- |
-| **NdArray (CPU)** | 7.867 s | 1.573 s | 1.00x |
-| **Wgpu (GPU)** | 0.327 s | 0.065 s | **24.20x** |
+| **NdArray (CPU)** | 7.973 s | 1.595 s | 1.00x |
+| **Wgpu (GPU)** | 0.346 s | 0.069 s | **23.12x** |
 
 ## Parallel Scan Scalability
 The core of the Mamba block, `selective_scan`, has been optimized using a **2x2 Matrix Parallel Associative Scan** (Hillis-Steele algorithm). This ensures $O(\log L)$ complexity and scales efficiently with modern complex SSM structures including multi-head and MIMO configurations.
@@ -37,4 +37,4 @@ The core of the Mamba block, `selective_scan`, has been optimized using a **2x2 
 The optimized parallel scan implementation ensures that the model scales efficiently to longer sequences without the exponential performance degradation often seen in naive sequential implementations.
 
 ## Conclusion
-The GPU implementation using the `wgpu` backend demonstrates a significant performance advantage, being approximately **144 times faster** than the CPU-based `ndarray` backend. Furthermore, the optimized parallel scan implementation ensures that the model scales efficiently to longer sequences without the exponential performance degradation often seen in naive sequential implementations.
+The GPU implementation using the `wgpu` backend demonstrates a significant performance advantage, being approximately **23 times faster** than the CPU-based `ndarray` backend on the tested hardware. The implementation of the parallel associative scan and causal convolution ensures both mathematical correctness and high throughput during training.

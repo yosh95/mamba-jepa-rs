@@ -44,14 +44,9 @@ This demo performs:
 
 ## 📊 Performance & Optimization
 
-This implementation leverages the `burn` framework for high-performance deep learning. By using the Wgpu backend, we achieve significant acceleration compared to CPU-based execution.
+This implementation leverages the `burn` framework for high-performance deep learning. Detailed benchmark results, including comparisons between CPU (NdArray) and GPU (Wgpu) backends, can be found in the separate benchmark report.
 
-Detailed benchmark results can be found in [BENCHMARK.md](./BENCHMARK.md).
-
-| Backend | Avg Time per Epoch (Batch=16, Seq=64) |
-| :--- | :--- |
-| **CPU (NdArray)** | 5.498 s |
-| **GPU (Wgpu/RTX 3050)** | **30.29 ms (181x faster)** |
+👉 **[BENCHMARK.md](./BENCHMARK.md)**
 
 ### Benchmarking
 

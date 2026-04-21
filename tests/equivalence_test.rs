@@ -15,9 +15,8 @@ fn test_mamba_block_forward_equivalence_multi_batch() {
     let n_heads = 2;
     let mimo_rank = 1;
 
-    // Must set use_conv: false because forward_step doesn't implement convolution
-    let config =
-        MambaConfig::new(d_model, d_state, expand, n_heads, mimo_rank).with_use_conv(false);
+    // Now we can set use_conv: true because forward_step implements convolution
+    let config = MambaConfig::new(d_model, d_state, expand, n_heads, mimo_rank).with_use_conv(true);
 
     let block = MambaBlock::<Backend>::new(&config, &device);
 
@@ -36,14 +35,17 @@ fn test_mamba_block_forward_equivalence_multi_batch() {
 
     let mut h = Tensor::<Backend, 4>::zeros([batch, n_heads, d_state, d_head / mimo_rank], &device);
     let mut prev_bx: Option<Tensor<Backend, 4>> = None;
+    let mut conv_state: Option<Tensor<Backend, 3>> = None;
     let mut y_step_list = Vec::new();
 
     for t in 0..seq_len {
         let xt = x.clone().slice([0..batch, t..t + 1]).squeeze::<2>(1);
-        let (yt, next_h, current_bx) = block.forward_step(xt, h, prev_bx);
+        let (yt, next_h, current_bx, next_conv_state) =
+            block.forward_step(xt, h, prev_bx, conv_state);
 
         h = next_h;
         prev_bx = Some(current_bx);
+        conv_state = Some(next_conv_state);
         y_step_list.push(yt.unsqueeze_dim::<3>(1));
     }
 
