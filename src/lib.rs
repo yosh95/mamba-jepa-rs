@@ -1,2 +1,2 @@
-pub mod jepa;
-pub mod mamba;
+pub mod latent;
+pub mod ssm;

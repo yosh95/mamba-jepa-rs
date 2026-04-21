@@ -7,7 +7,7 @@ use burn::tensor::{Distribution, Tensor};
 use core::f32::consts::PI;
 
 #[derive(Config, Debug)]
-pub struct MambaConfig {
+pub struct SsmConfig {
     pub d_model: usize,
     pub d_state: usize,
     pub expand: usize,
@@ -20,7 +20,7 @@ pub struct MambaConfig {
 }
 
 #[derive(Module, Debug)]
-pub struct MambaBlock<B: Backend> {
+pub struct SsmBlock<B: Backend> {
     pub in_proj: Linear<B>,
     pub conv1d: Option<Conv1d<B>>,
     pub out_proj: Linear<B>,
@@ -41,8 +41,8 @@ pub struct MambaBlock<B: Backend> {
     pub mimo_rank: usize,
 }
 
-impl<B: Backend> MambaBlock<B> {
-    pub fn new(config: &MambaConfig, device: &B::Device) -> Self {
+impl<B: Backend> SsmBlock<B> {
+    pub fn new(config: &SsmConfig, device: &B::Device) -> Self {
         let d_inner = config.d_model * config.expand;
         let d_state = config.d_state;
         let n_heads = config.n_heads;
@@ -90,7 +90,6 @@ impl<B: Backend> MambaBlock<B> {
             Distribution::Uniform(-1.0, -0.1),
             device,
         );
-        // Initialize a_im (imaginary part) with Uniform [0, 2π) to cover various rotation frequencies
         let a_im = Tensor::random(
             [n_heads, d_state],
             Distribution::Uniform(0.0, PI as f64 * 2.0),
@@ -173,7 +172,6 @@ impl<B: Backend> MambaBlock<B> {
 
         let u_heads = u.reshape([batch, seq_len, n_heads, d_head]);
 
-        // Explicitly expand dimensions for bias broadcasting [1, 1, n_heads, mimo_rank, d_state]
         let b_bias_expanded = self
             .b_bias
             .val()
@@ -188,7 +186,7 @@ impl<B: Backend> MambaBlock<B> {
             .unsqueeze_dim::<5>(0);
         let c = c.reshape([batch, seq_len, n_heads, mimo_rank, d_state]) + c_bias_expanded;
 
-        let dt = delta.clone().unsqueeze_dim::<4>(3); // [B, L, H, 1]
+        let dt = delta.clone().unsqueeze_dim::<4>(3);
         let da_re =
             (self.a_re.val().unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0) * dt.clone()).exp();
         let da_im = self.a_im.val().unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0) * dt;
@@ -218,11 +216,12 @@ impl<B: Backend> MambaBlock<B> {
             .unsqueeze_dim::<5>(4)
             * da_re.unsqueeze_dim::<5>(4);
 
-        let mut bx_prev = bx.clone().slice([0..batch, 0..seq_len - 1]);
+        let d_head_mimo = d_head / mimo_rank;
+        let mut bx_prev = bx.clone().slice([0..batch, 0..seq_len - 1, 0..n_heads, 0..d_state, 0..d_head_mimo]);
         bx_prev = Tensor::cat(
             vec![
                 Tensor::zeros(
-                    [batch, 1, n_heads, d_state, d_head / mimo_rank],
+                    [batch, 1, n_heads, d_state, d_head_mimo],
                     &bx.device(),
                 ),
                 bx_prev,
@@ -233,16 +232,16 @@ impl<B: Backend> MambaBlock<B> {
 
         let w0 = w
             .clone()
-            .slice([0..batch, 0..seq_len, 0..n_heads, 0..d_state / 2]);
-        let w1 = w.slice([0..batch, 0..seq_len, 0..n_heads, d_state / 2..d_state]);
+            .slice([0..batch, 0..seq_len, 0..n_heads, 0..d_state / 2, 0..d_head_mimo]);
+        let w1 = w.slice([0..batch, 0..seq_len, 0..n_heads, d_state / 2..d_state, 0..d_head_mimo]);
 
-        let (h_re, h_im) = self.hillis_steele_scan_matrix(a00, a01, a10, a11, w0, w1);
+        let (h_re, h_im) = self.parallel_scan(a00, a01, a10, a11, w0, w1);
         let h = Tensor::cat(vec![h_re, h_im], 3);
 
         c.matmul(h).reshape([batch, seq_len, self.d_inner])
     }
 
-    fn hillis_steele_scan_matrix(
+    fn parallel_scan(
         &self,
         mut a00: Tensor<B, 5>,
         mut a01: Tensor<B, 5>,
@@ -251,28 +250,29 @@ impl<B: Backend> MambaBlock<B> {
         mut w0: Tensor<B, 5>,
         mut w1: Tensor<B, 5>,
     ) -> (Tensor<B, 5>, Tensor<B, 5>) {
-        let [batch, seq_len, _, _, _] = a00.dims();
+        let [batch, seq_len, n_heads, dim4, a_dim5] = a00.dims();
+        let [_b, _s, _n, _d4, w_dim5] = w0.dims();
         let mut offset = 1;
         while offset < seq_len {
             let left = 0..(seq_len - offset);
             let right = offset..seq_len;
             let (r00, r01, r10, r11) = (
-                a00.clone().slice([0..batch, right.clone()]),
-                a01.clone().slice([0..batch, right.clone()]),
-                a10.clone().slice([0..batch, right.clone()]),
-                a11.clone().slice([0..batch, right.clone()]),
+                a00.clone().slice([0..batch, right.clone(), 0..n_heads, 0..dim4, 0..a_dim5]),
+                a01.clone().slice([0..batch, right.clone(), 0..n_heads, 0..dim4, 0..a_dim5]),
+                a10.clone().slice([0..batch, right.clone(), 0..n_heads, 0..dim4, 0..a_dim5]),
+                a11.clone().slice([0..batch, right.clone(), 0..n_heads, 0..dim4, 0..a_dim5]),
             );
             let (l00, l01, l10, l11) = (
-                a00.clone().slice([0..batch, left.clone()]),
-                a01.clone().slice([0..batch, left.clone()]),
-                a10.clone().slice([0..batch, left.clone()]),
-                a11.clone().slice([0..batch, left.clone()]),
+                a00.clone().slice([0..batch, left.clone(), 0..n_heads, 0..dim4, 0..a_dim5]),
+                a01.clone().slice([0..batch, left.clone(), 0..n_heads, 0..dim4, 0..a_dim5]),
+                a10.clone().slice([0..batch, left.clone(), 0..n_heads, 0..dim4, 0..a_dim5]),
+                a11.clone().slice([0..batch, left.clone(), 0..n_heads, 0..dim4, 0..a_dim5]),
             );
             let (rw0, rw1, lw0, lw1) = (
-                w0.clone().slice([0..batch, right.clone()]),
-                w1.clone().slice([0..batch, right.clone()]),
-                w0.clone().slice([0..batch, left.clone()]),
-                w1.clone().slice([0..batch, left.clone()]),
+                w0.clone().slice([0..batch, right.clone(), 0..n_heads, 0..dim4, 0..w_dim5]),
+                w1.clone().slice([0..batch, right.clone(), 0..n_heads, 0..dim4, 0..w_dim5]),
+                w0.clone().slice([0..batch, left.clone(), 0..n_heads, 0..dim4, 0..w_dim5]),
+                w1.clone().slice([0..batch, left.clone(), 0..n_heads, 0..dim4, 0..w_dim5]),
             );
             let n00 = r00.clone() * l00.clone() + r01.clone() * l10.clone();
             let n01 = r00.clone() * l01.clone() + r01.clone() * l11.clone();
@@ -280,12 +280,12 @@ impl<B: Backend> MambaBlock<B> {
             let n11 = r10.clone() * l01.clone() + r11.clone() * l11.clone();
             let nw0 = r00 * lw0.clone() + r01 * lw1.clone() + rw0;
             let nw1 = r10 * lw0 + r11 * lw1 + rw1;
-            a00 = Tensor::cat(vec![a00.slice([0..batch, 0..offset]), n00], 1);
-            a01 = Tensor::cat(vec![a01.slice([0..batch, 0..offset]), n01], 1);
-            a10 = Tensor::cat(vec![a10.slice([0..batch, 0..offset]), n10], 1);
-            a11 = Tensor::cat(vec![a11.slice([0..batch, 0..offset]), n11], 1);
-            w0 = Tensor::cat(vec![w0.slice([0..batch, 0..offset]), nw0], 1);
-            w1 = Tensor::cat(vec![w1.slice([0..batch, 0..offset]), nw1], 1);
+            a00 = Tensor::cat(vec![a00.slice([0..batch, 0..offset, 0..n_heads, 0..dim4, 0..a_dim5]), n00], 1);
+            a01 = Tensor::cat(vec![a01.slice([0..batch, 0..offset, 0..n_heads, 0..dim4, 0..a_dim5]), n01], 1);
+            a10 = Tensor::cat(vec![a10.slice([0..batch, 0..offset, 0..n_heads, 0..dim4, 0..a_dim5]), n10], 1);
+            a11 = Tensor::cat(vec![a11.slice([0..batch, 0..offset, 0..n_heads, 0..dim4, 0..a_dim5]), n11], 1);
+            w0 = Tensor::cat(vec![w0.slice([0..batch, 0..offset, 0..n_heads, 0..dim4, 0..w_dim5]), nw0], 1);
+            w1 = Tensor::cat(vec![w1.slice([0..batch, 0..offset, 0..n_heads, 0..dim4, 0..w_dim5]), nw1], 1);
             offset *= 2;
         }
         (w0, w1)

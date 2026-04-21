@@ -2,8 +2,8 @@ use burn::backend::{ndarray::NdArrayDevice, Autodiff, NdArray};
 use burn::module::AutodiffModule;
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::Tensor;
-use mamba_jepa_rs::jepa::{JepaState, JepaWorldModel};
-use mamba_jepa_rs::mamba::MambaConfig;
+use ssm_latent_model::latent::{LatentPredictor, LatentState};
+use ssm_latent_model::ssm::SsmConfig;
 
 type MyBackend = NdArray<f32>;
 type MyAutodiffBackend = Autodiff<MyBackend>;
@@ -11,7 +11,7 @@ type MyAutodiffBackend = Autodiff<MyBackend>;
 fn main() {
     let device = NdArrayDevice::default();
 
-    let config = MambaConfig {
+    let config = SsmConfig {
         d_model: 32,
         d_state: 16,
         expand: 2,
@@ -27,12 +27,12 @@ fn main() {
     let epochs = 100;
 
     let mut model =
-        JepaWorldModel::<MyAutodiffBackend>::new(&config, input_dim, action_dim, &device);
+        LatentPredictor::<MyAutodiffBackend>::new(&config, input_dim, action_dim, &device);
     let mut optim =
-        AdamConfig::new().init::<MyAutodiffBackend, JepaWorldModel<MyAutodiffBackend>>();
+        AdamConfig::new().init::<MyAutodiffBackend, LatentPredictor<MyAutodiffBackend>>();
 
     println!("==========================================================");
-    println!(" Mamba-3-JEPA World Model (Multi-batch)");
+    println!(" Latent SSM Predictor");
     println!("==========================================================");
 
     // Training Loop
@@ -41,7 +41,7 @@ fn main() {
         let mut act_vec = Vec::new();
 
         for b in 0..batch_size {
-            let offset = (b as f32) * 0.5 + (epoch as f32) * 0.01; // Vary data each epoch
+            let offset = (b as f32) * 0.5 + (epoch as f32) * 0.01;
             for t in 0..seq_len {
                 let angle = (t as f32) * 0.3 + offset;
                 let noise_obs = (rand::random::<f32>() - 0.5) * 0.01;
@@ -68,7 +68,6 @@ fn main() {
         let loss = model.loss(z.clone(), predicted_z, 1.0);
 
         if epoch % 50 == 0 || epoch == 1 {
-            // Calculate latent variance to verify no representation collapse
             let z_var = z.clone().var(0).mean().into_data();
             println!(
                 "Epoch {:3}: Total Loss = {:?}, Latent Variance = {:?}",
@@ -83,7 +82,7 @@ fn main() {
         model = optim.step(2e-3, model, grads);
     }
 
-    println!("\nPhase 2: Open-loop Imagination (Mamba-3 Stateful)");
+    println!("\nPhase 2: Sequence Prediction");
     let model_valid = model.valid();
 
     let initial_obs = Tensor::<MyBackend, 3>::from_data(
@@ -97,7 +96,7 @@ fn main() {
     let d_inner = config.d_model * config.expand;
     let d_head = d_inner / config.n_heads;
 
-    let mut state = JepaState {
+    let mut state = LatentState {
         h: Tensor::zeros(
             [
                 batch_size,
@@ -118,7 +117,7 @@ fn main() {
         },
     };
 
-    println!("Starting imagination from z[0]...");
+    println!("Starting prediction from z[0]...");
     for t in 1..=5 {
         let action = Tensor::<MyBackend, 2>::from_data(
             burn::tensor::TensorData::new(vec![0.0, 0.1, 0.0, 0.1], [batch_size, 2]),

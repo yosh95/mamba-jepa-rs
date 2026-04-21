@@ -1,15 +1,15 @@
 use burn::backend::{Autodiff, NdArray};
 use burn::tensor::Tensor;
-use mamba_jepa_rs::mamba::{MambaBlock, MambaConfig};
+use ssm_latent_model::ssm::{SsmBlock, SsmConfig};
 
 #[test]
 fn test_gradient_calculable() {
     type Backend = Autodiff<NdArray<f32>>;
     let device = Default::default();
 
-    let config = MambaConfig::new(16, 8, 2, 2, 1);
+    let config = SsmConfig::new(16, 8, 2, 2, 1);
 
-    let model = MambaBlock::<Backend>::new(&config, &device);
+    let model = SsmBlock::<Backend>::new(&config, &device);
 
     let x = Tensor::<Backend, 3>::random([1, 4, 16], burn::tensor::Distribution::Default, &device);
 

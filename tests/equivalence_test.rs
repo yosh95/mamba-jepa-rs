@@ -1,9 +1,9 @@
 use burn::backend::NdArray;
 use burn::tensor::Tensor;
-use mamba_jepa_rs::mamba::{MambaBlock, MambaConfig};
+use ssm_latent_model::ssm::{SsmBlock, SsmConfig};
 
 #[test]
-fn test_mamba_block_forward_equivalence_multi_batch() {
+fn test_ssm_block_forward_equivalence_multi_batch() {
     type Backend = NdArray<f32>;
     let device = Default::default();
 
@@ -15,11 +15,9 @@ fn test_mamba_block_forward_equivalence_multi_batch() {
     let n_heads = 2;
     let mimo_rank = 1;
 
-    // Now we can set use_conv: false to isolate the SSM logic
-    let config =
-        MambaConfig::new(d_model, d_state, expand, n_heads, mimo_rank).with_use_conv(false);
+    let config = SsmConfig::new(d_model, d_state, expand, n_heads, mimo_rank).with_use_conv(false);
 
-    let block = MambaBlock::<Backend>::new(&config, &device);
+    let block = SsmBlock::<Backend>::new(&config, &device);
 
     let x = Tensor::<Backend, 3>::random(
         [batch, seq_len, d_model],
@@ -27,10 +25,8 @@ fn test_mamba_block_forward_equivalence_multi_batch() {
         &device,
     );
 
-    // 1. Full sequence forward
     let y_parallel = block.forward(x.clone());
 
-    // 2. Step-by-step forward
     let d_inner = d_model * expand;
     let d_head = d_inner / n_heads;
 
@@ -52,7 +48,6 @@ fn test_mamba_block_forward_equivalence_multi_batch() {
 
     let y_sequential = Tensor::cat(y_step_list, 1);
 
-    // Compare with lower precision to check basic equivalence
     y_parallel
         .to_data()
         .assert_approx_eq(&y_sequential.to_data(), 3);

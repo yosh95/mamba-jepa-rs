@@ -2,19 +2,19 @@ use burn::backend::{ndarray::NdArrayDevice, wgpu::WgpuDevice, Autodiff, NdArray,
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::Tensor;
-use mamba_jepa_rs::jepa::JepaWorldModel;
-use mamba_jepa_rs::mamba::MambaConfig;
+use ssm_latent_model::latent::LatentPredictor;
+use ssm_latent_model::ssm::SsmConfig;
 use std::time::Instant;
 
 fn run_benchmark<B: AutodiffBackend>(device: B::Device, name: &str, epochs: usize) {
-    let config = MambaConfig::new(128, 32, 2, 8, 4);
+    let config = SsmConfig::new(128, 32, 2, 8, 4);
     let input_dim = 64;
     let action_dim = 16;
     let seq_len = 64;
     let batch_size = 16;
 
-    let mut model = JepaWorldModel::<B>::new(&config, input_dim, action_dim, &device);
-    let mut optim = AdamConfig::new().init::<B, JepaWorldModel<B>>();
+    let mut model = LatentPredictor::<B>::new(&config, input_dim, action_dim, &device);
+    let mut optim = AdamConfig::new().init::<B, LatentPredictor<B>>();
 
     println!(
         "Starting benchmark for {}: epochs={}, batch_size={}, seq_len={}",
