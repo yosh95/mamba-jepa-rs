@@ -46,9 +46,12 @@ fn main() {
                 let angle = (t as f32) * 0.3 + offset;
                 let noise_obs = (rand::random::<f32>() - 0.5) * 0.01;
                 let noise_act = (rand::random::<f32>() - 0.5) * 0.01;
-                
+
                 obs_vec.extend_from_slice(&[angle.cos() + noise_obs, angle.sin() + noise_obs]);
-                act_vec.extend_from_slice(&[-(angle.sin()) * 0.1 + noise_act, angle.cos() * 0.1 + noise_act]);
+                act_vec.extend_from_slice(&[
+                    -(angle.sin()) * 0.1 + noise_act,
+                    angle.cos() * 0.1 + noise_act,
+                ]);
             }
         }
 
@@ -62,13 +65,16 @@ fn main() {
         );
 
         let (z, predicted_z) = model.forward(obs_data, action_data);
-        let loss = model.loss(z, predicted_z, 1.0);
+        let loss = model.loss(z.clone(), predicted_z, 1.0);
 
         if epoch % 50 == 0 || epoch == 1 {
+            // Calculate latent variance to verify no representation collapse
+            let z_var = z.clone().var(0).mean().into_data();
             println!(
-                "Epoch {:3}: Total Loss = {:?}",
+                "Epoch {:3}: Total Loss = {:?}, Latent Variance = {:?}",
                 epoch,
-                loss.clone().into_data()
+                loss.clone().into_data(),
+                z_var
             );
         }
 
@@ -85,7 +91,7 @@ fn main() {
         &device,
     );
 
-    let z_start = model_valid.encoder.forward(initial_obs);
+    let z_start = model_valid.encode(initial_obs);
     let mut current_z = z_start.squeeze::<2>(1);
 
     let d_inner = config.d_model * config.expand;
@@ -101,16 +107,15 @@ fn main() {
             ],
             &device,
         ),
-        prev_bx: Tensor::zeros(
-            [
-                batch_size,
-                config.n_heads,
-                config.d_state,
-                d_head / config.mimo_rank,
-            ],
-            &device,
-        ),
-        conv_state: Tensor::zeros([batch_size, d_inner, config.conv_kernel - 1], &device),
+        prev_bx: None,
+        conv_state: if config.use_conv {
+            Some(Tensor::zeros(
+                [batch_size, d_inner, config.conv_kernel - 1],
+                &device,
+            ))
+        } else {
+            None
+        },
     };
 
     println!("Starting imagination from z[0]...");

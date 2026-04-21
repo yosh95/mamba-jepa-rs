@@ -55,8 +55,8 @@ To run the full model benchmark:
 cargo run --example bench --release
 ```
 
-### Optimization: Chunked Parallel Associative Scan
-Unlike naive RNN-style implementations, our Mamba block uses a **Chunked Parallel Associative Scan**. This reduces the computational complexity to $O(\log L)$ steps and optimizes memory bandwidth by grouping operations into chunks, minimizing expensive `Tensor::cat` operations on the GPU.
+### Optimization: Parallel Associative Scan
+Unlike naive RNN-style implementations, our Mamba block uses a **Parallel Associative Scan** (Hillis-Steele). This reduces the computational complexity to $O(\log L)$ steps, allowing the model to leverage GPU parallelism across the sequence length during training.
 
 The implementation is verified to be mathematically equivalent between:
 - **Sequential Mode**: Used for efficient auto-regressive inference (`forward_step`).
