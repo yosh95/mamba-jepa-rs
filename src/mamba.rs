@@ -22,8 +22,10 @@ pub struct MambaBlock<B: Backend> {
     pub in_proj: Linear<B>,
     pub out_proj: Linear<B>,
     pub dt_proj: Linear<B>,
-    pub b_proj: Linear<B>,
-    pub c_proj: Linear<B>,
+    pub b_re_proj: Linear<B>,
+    pub b_im_proj: Linear<B>,
+    pub c_re_proj: Linear<B>,
+    pub c_im_proj: Linear<B>,
     pub a_re: Param<Tensor<B, 2>>,
     pub a_im: Param<Tensor<B, 2>>,
     pub d: Param<Tensor<B, 1>>,
@@ -36,16 +38,17 @@ impl<B: Backend> MambaBlock<B> {
         let d_inner = config.d_model * config.expand;
         let d_state = config.d_state;
 
-        // Projections
         let in_proj = LinearConfig::new(config.d_model, d_inner * 2).init(device);
         let out_proj = LinearConfig::new(d_inner, config.d_model).init(device);
 
-        // SSM Parameter Projections (Dynamic)
         let dt_proj = LinearConfig::new(d_inner, d_inner).init(device);
-        let b_proj = LinearConfig::new(d_inner, d_state).init(device);
-        let c_proj = LinearConfig::new(d_inner, d_state).init(device);
 
-        // A is the system matrix, usually initialized with special patterns
+        // B and C are now fully complex projections
+        let b_re_proj = LinearConfig::new(d_inner, d_state).init(device);
+        let b_im_proj = LinearConfig::new(d_inner, d_state).init(device);
+        let c_re_proj = LinearConfig::new(d_inner, d_state).init(device);
+        let c_im_proj = LinearConfig::new(d_inner, d_state).init(device);
+
         let a_re = Tensor::random(
             [d_inner, d_state],
             Distribution::Uniform(-1.0, -0.1),
@@ -59,8 +62,10 @@ impl<B: Backend> MambaBlock<B> {
             in_proj,
             out_proj,
             dt_proj,
-            b_proj,
-            c_proj,
+            b_re_proj,
+            b_im_proj,
+            c_re_proj,
+            c_im_proj,
             a_re: Param::from_tensor(a_re),
             a_im: Param::from_tensor(a_im),
             d: Param::from_tensor(d),
@@ -69,36 +74,21 @@ impl<B: Backend> MambaBlock<B> {
         }
     }
 
-    /// Forward pass through Mamba block
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let device = &x.device();
-
-        // 1. Input Projection & Split
         let projected = self.in_proj.forward(x);
         let mut chunks = projected.chunk(2, 2);
-        let u = chunks.remove(0); // Branch for SSM
-        let gate = chunks.remove(0); // Branch for Gating
+        let u = chunks.remove(0);
+        let gate = chunks.remove(0);
 
-        // 2. Generate dynamic parameters (Selection Mechanism)
-        // delta = softplus(dt_proj(u))
         let delta = burn::tensor::activation::softplus(self.dt_proj.forward(u.clone()), 1.0);
 
-        // B and C can be complex or real. Here we simplify to real input for B,C
-        // and treat them as complex with 0 imaginary part or just real.
-        let b_raw = self.b_proj.forward(u.clone());
-        let c_raw = self.c_proj.forward(u.clone());
+        let b_re = self.b_re_proj.forward(u.clone());
+        let b_im = self.b_im_proj.forward(u.clone());
+        let c_re = self.c_re_proj.forward(u.clone());
+        let c_im = self.c_im_proj.forward(u.clone());
 
-        // 3. Selective Scan
-        let (y_ssm, _, _) = self.selective_scan(
-            u.clone(),
-            delta,
-            b_raw.clone(),
-            Tensor::zeros(b_raw.dims(), device), // b_im
-            c_raw.clone(),
-            Tensor::zeros(c_raw.dims(), device), // c_im
-        );
+        let (y_ssm, _, _) = self.selective_scan(u.clone(), delta, b_re, b_im, c_re, c_im);
 
-        // 4. Gating and Output Projection
         let y = y_ssm * burn::tensor::activation::silu(gate);
         self.out_proj.forward(y)
     }
@@ -108,33 +98,26 @@ impl<B: Backend> MambaBlock<B> {
         x: Tensor<B, 2>,
         prev_h: ComplexTensor<B, 3>,
     ) -> (Tensor<B, 2>, ComplexTensor<B, 3>) {
-        // 1. Input Projection
         let projected = self.in_proj.forward(x);
         let mut chunks = projected.chunk(2, 1);
         let u = chunks.remove(0);
         let gate = chunks.remove(0);
 
-        // 2. Selection Mechanism
         let delta = burn::tensor::activation::softplus(self.dt_proj.forward(u.clone()), 1.0);
-        let b_raw = self.b_proj.forward(u.clone());
-        let c_raw = self.c_proj.forward(u.clone());
 
-        // 3. SSM Step
+        let b_re = self.b_re_proj.forward(u.clone());
+        let b_im = self.b_im_proj.forward(u.clone());
+        let c_re = self.c_re_proj.forward(u.clone());
+        let c_im = self.c_im_proj.forward(u.clone());
+
         let (y_ssm, next_h) = self.step(
-            u,
+            u.clone(),
             delta,
-            ComplexTensor {
-                re: b_raw.clone(),
-                im: Tensor::zeros_like(&b_raw),
-            },
-            ComplexTensor {
-                re: c_raw.clone(),
-                im: Tensor::zeros_like(&c_raw),
-            },
+            ComplexTensor { re: b_re, im: b_im },
+            ComplexTensor { re: c_re, im: c_im },
             prev_h,
         );
 
-        // 4. Gating & Output
         let y = y_ssm * burn::tensor::activation::silu(gate);
         let out = self.out_proj.forward(y);
 
@@ -143,16 +126,13 @@ impl<B: Backend> MambaBlock<B> {
 
     pub fn selective_scan(
         &self,
-        u: Tensor<B, 3>,     // [batch, seq_len, d_inner]
-        delta: Tensor<B, 3>, // [batch, seq_len, d_inner]
-        b_re: Tensor<B, 3>,  // [batch, seq_len, d_state]
+        u: Tensor<B, 3>,
+        delta: Tensor<B, 3>,
+        b_re: Tensor<B, 3>,
         b_im: Tensor<B, 3>,
         c_re: Tensor<B, 3>,
         c_im: Tensor<B, 3>,
     ) -> (Tensor<B, 3>, Tensor<B, 4>, Tensor<B, 4>) {
-        let [_batch, _seq_len, _d_inner] = u.dims();
-
-        // Discretization
         let dt = delta.unsqueeze_dim::<4>(3);
         let a_re = self.a_re.val().unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0);
         let a_im = self.a_im.val().unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0);
@@ -166,7 +146,6 @@ impl<B: Backend> MambaBlock<B> {
         let beta_re = (dt.clone() * b_re.unsqueeze_dim::<4>(2)) * u_u.clone();
         let beta_im = (dt * b_im.unsqueeze_dim::<4>(2)) * u_u;
 
-        // Correct Parallel Scan (Associative Scan)
         let (h_re, h_im) = self.parallel_scan(alpha_re, alpha_im, beta_re, beta_im);
 
         let cr = c_re.unsqueeze_dim::<4>(2);
@@ -189,7 +168,6 @@ impl<B: Backend> MambaBlock<B> {
         prev_h: ComplexTensor<B, 3>,
     ) -> (Tensor<B, 2>, ComplexTensor<B, 3>) {
         let dt_u = delta.unsqueeze_dim::<3>(2);
-
         let a_re = self.a_re.val().unsqueeze_dim::<3>(0);
         let a_im = self.a_im.val().unsqueeze_dim::<3>(0);
 
@@ -223,7 +201,7 @@ impl<B: Backend> MambaBlock<B> {
         )
     }
 
-    /// Internal parallel scan implementation using Hillis-Steele algorithm.
+    /// Internal parallel scan. Public for integration testing but hidden from docs.
     #[doc(hidden)]
     pub fn parallel_scan(
         &self,
@@ -232,12 +210,10 @@ impl<B: Backend> MambaBlock<B> {
         beta_re: Tensor<B, 4>,
         beta_im: Tensor<B, 4>,
     ) -> (Tensor<B, 4>, Tensor<B, 4>) {
-        let [_batch, seq_len, _d_inner, _d_state] = alpha_re.dims();
-
+        let [_batch, seq_len, _, _] = alpha_re.dims();
         if seq_len <= 8 {
             return self.sequential_scan_internal(alpha_re, alpha_im, beta_re, beta_im);
         }
-
         self.hillis_steele_scan(alpha_re, alpha_im, beta_re, beta_im)
     }
 
@@ -281,7 +257,7 @@ impl<B: Backend> MambaBlock<B> {
         mut out_beta_re: Tensor<B, 4>,
         mut out_beta_im: Tensor<B, 4>,
     ) -> (Tensor<B, 4>, Tensor<B, 4>) {
-        let [batch, seq_len, _d_inner, _d_state] = out_alpha_re.dims();
+        let [batch, seq_len, _, _] = out_alpha_re.dims();
         let mut offset = 1;
 
         while offset < seq_len {
@@ -293,8 +269,12 @@ impl<B: Backend> MambaBlock<B> {
             let b_re_l = out_beta_re.clone().slice([0..batch, left_indices.clone()]);
             let b_im_l = out_beta_im.clone().slice([0..batch, left_indices.clone()]);
 
-            let a_re_r = out_alpha_re.clone().slice([0..batch, right_indices.clone()]);
-            let a_im_r = out_alpha_im.clone().slice([0..batch, right_indices.clone()]);
+            let a_re_r = out_alpha_re
+                .clone()
+                .slice([0..batch, right_indices.clone()]);
+            let a_im_r = out_alpha_im
+                .clone()
+                .slice([0..batch, right_indices.clone()]);
             let b_re_r = out_beta_re.clone().slice([0..batch, right_indices.clone()]);
             let b_im_r = out_beta_im.clone().slice([0..batch, right_indices.clone()]);
 

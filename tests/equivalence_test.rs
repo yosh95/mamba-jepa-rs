@@ -39,16 +39,24 @@ fn test_selective_scan_vs_step_equivalence() {
         burn::tensor::Distribution::Default,
         &device,
     );
-    let b_im = Tensor::<Backend, 3>::zeros([1, seq_len, d_state], &device);
+    let b_im = Tensor::<Backend, 3>::random(
+        [1, seq_len, d_state],
+        burn::tensor::Distribution::Default,
+        &device,
+    );
     let c_re = Tensor::<Backend, 3>::random(
         [1, seq_len, d_state],
         burn::tensor::Distribution::Default,
         &device,
     );
-    let c_im = Tensor::<Backend, 3>::zeros([1, seq_len, d_state], &device);
+    let c_im = Tensor::<Backend, 3>::random(
+        [1, seq_len, d_state],
+        burn::tensor::Distribution::Default,
+        &device,
+    );
 
     // 1. Parallel
-    let (y_parallel, h_re_parallel, _h_im_parallel) = model.selective_scan(
+    let (y_parallel, h_re_parallel, h_im_parallel) = model.selective_scan(
         u.clone(),
         delta.clone(),
         b_re.clone(),
@@ -85,11 +93,17 @@ fn test_selective_scan_vs_step_equivalence() {
         h_im_step = next_h.im.clone();
         y_step_list.push(yt.unsqueeze_dim::<3>(1));
 
+        // State check
         let hr_p = h_re_parallel
             .clone()
             .slice([0..1, t..t + 1])
             .squeeze::<3>(1);
+        let hi_p = h_im_parallel
+            .clone()
+            .slice([0..1, t..t + 1])
+            .squeeze::<3>(1);
         hr_p.to_data().assert_approx_eq(&h_re_step.to_data(), 2);
+        hi_p.to_data().assert_approx_eq(&h_im_step.to_data(), 2);
     }
 
     let y_sequential = Tensor::cat(y_step_list, 1);
@@ -99,10 +113,11 @@ fn test_selective_scan_vs_step_equivalence() {
 }
 
 #[test]
-fn test_mamba_block_forward_equivalence() {
+fn test_mamba_block_forward_equivalence_multi_batch() {
     type Backend = NdArray<f32>;
     let device = Default::default();
 
+    let batch = 2; // Test multi-batch
     let d_model = 16;
     let seq_len = 8;
     let d_state = 8;
@@ -118,7 +133,7 @@ fn test_mamba_block_forward_equivalence() {
     let block = MambaBlock::<Backend>::new(&config, &device);
 
     let x = Tensor::<Backend, 3>::random(
-        [1, seq_len, d_model],
+        [batch, seq_len, d_model],
         burn::tensor::Distribution::Default,
         &device,
     );
@@ -127,12 +142,12 @@ fn test_mamba_block_forward_equivalence() {
     let y_parallel = block.forward(x.clone());
 
     // 2. Step-by-step forward
-    let mut h_re = Tensor::<Backend, 3>::zeros([1, d_inner, d_state], &device);
-    let mut h_im = Tensor::<Backend, 3>::zeros([1, d_inner, d_state], &device);
+    let mut h_re = Tensor::<Backend, 3>::zeros([batch, d_inner, d_state], &device);
+    let mut h_im = Tensor::<Backend, 3>::zeros([batch, d_inner, d_state], &device);
     let mut y_step_list = Vec::new();
 
     for t in 0..seq_len {
-        let xt = x.clone().slice([0..1, t..t + 1]).squeeze::<2>(1);
+        let xt = x.clone().slice([0..batch, t..t + 1]).squeeze::<2>(1);
         let (yt, next_h) = block.forward_step(xt, ComplexTensor { re: h_re, im: h_im });
 
         h_re = next_h.re;
@@ -146,5 +161,4 @@ fn test_mamba_block_forward_equivalence() {
     y_parallel
         .to_data()
         .assert_approx_eq(&y_sequential.to_data(), 2);
-    println!("MambaBlock forward equivalence test passed!");
 }

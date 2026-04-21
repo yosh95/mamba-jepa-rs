@@ -28,21 +28,21 @@ The benchmark measures the time taken for a full training step (Forward pass, Lo
 
 | Backend | Total Time (5 Epochs) | Avg Time per Epoch | Speedup |
 | :--- | :--- | :--- | :--- |
-| **NdArray (CPU)** | 26.350 s | 5.270 s | 1.00x |
-| **Wgpu (GPU)** | 0.171 s | 0.034 s | **155.00x** |
+| **NdArray (CPU)** | 26.438 s | 5.287 s | 1.00x |
+| **Wgpu (GPU)** | 0.184 s | 0.036 s | **143.68x** |
 
 ## Parallel Scan Scalability
 The core of the Mamba block, `parallel_scan`, has been optimized using the Hillis-Steele algorithm to ensure $O(\log L)$ complexity in terms of sequential operations (kernel launches).
 
 | Sequence Length | Avg Execution Time (GPU) |
 | :--- | :--- |
-| 64 | 5.03 ms |
-| 128 | 8.07 ms |
-| 256 | 6.82 ms |
-| 512 | 7.72 ms |
-| 1024 | 4.01 ms |
+| 64 | 5.18 ms |
+| 128 | 5.97 ms |
+| 256 | 6.90 ms |
+| 512 | 7.73 ms |
+| 1024 | 3.92 ms |
 
 *Note: The near-constant execution time across different sequence lengths demonstrates the efficiency of the parallel associative scan implementation on GPU backends.*
 
 ## Conclusion
-The GPU implementation using the `wgpu` backend demonstrates a significant performance advantage, being approximately **155 times faster** than the CPU-based `ndarray` backend. Furthermore, the optimized parallel scan implementation ensures that the model scales efficiently to longer sequences without the exponential performance degradation often seen in naive sequential implementations.
+The GPU implementation using the `wgpu` backend demonstrates a significant performance advantage, being approximately **144 times faster** than the CPU-based `ndarray` backend. Furthermore, the optimized parallel scan implementation ensures that the model scales efficiently to longer sequences without the exponential performance degradation often seen in naive sequential implementations.
