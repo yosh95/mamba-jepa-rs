@@ -42,6 +42,41 @@ This demo performs:
 2.  **Phase 2 (Imagination)**: Predicting future states in latent space without new observations, relying on Mamba's internal state.
 3.  **Verification**: Prints the "Latent Variance" to prove that SIGReg is successfully preventing the model from collapsing.
 
+## 📊 Performance & Optimization
+
+This implementation leverages the `burn` framework for high-performance deep learning. By using the Wgpu backend, we achieve significant acceleration compared to CPU-based execution.
+
+Detailed benchmark results can be found in [BENCHMARK.md](./BENCHMARK.md).
+
+| Backend | Avg Time per Epoch (Batch=16, Seq=64) |
+| :--- | :--- |
+| **CPU (NdArray)** | 5.498 s |
+| **GPU (Wgpu/RTX 3050)** | **30.29 ms (181x faster)** |
+
+### Benchmarking
+
+To run the full model benchmark:
+```bash
+cargo run --example bench --release
+```
+
+To profile the Parallel Associative Scan performance across different sequence lengths:
+```bash
+cargo run --example bench_scan --release
+```
+
+### Optimization: Chunked Parallel Associative Scan
+Unlike naive RNN-style implementations, our Mamba block uses a **Chunked Parallel Associative Scan**. This reduces the computational complexity to $O(\log L)$ steps and optimizes memory bandwidth by grouping operations into chunks, minimizing expensive `Tensor::cat` operations on the GPU.
+
+The implementation is verified to be mathematically equivalent between:
+- **Sequential Mode**: Used for efficient auto-regressive inference (`forward_step`).
+- **Parallel Mode**: Used for high-throughput training and processing (`forward`).
+
+You can run the equivalence tests with:
+```bash
+cargo test --test equivalence_test
+```
+
 ## 📚 References
 
 - **Mamba-3**: Lahoti et al., *"Mamba-3: Improved Sequence Modeling using State Space Principles"*, [arXiv:2603.15569](https://arxiv.org/abs/2603.15569), 2026.

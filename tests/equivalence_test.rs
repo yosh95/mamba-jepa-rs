@@ -31,7 +31,7 @@ fn test_selective_scan_vs_step_equivalence() {
     let c_im = Tensor::<Backend, 3>::zeros([1, seq_len, d_state], &device);
 
     // 1. Parallel
-    let (y_parallel, h_re_parallel, h_im_parallel) = model.selective_scan(
+    let (y_parallel, h_re_parallel, _h_im_parallel) = model.selective_scan(
         u.clone(), delta.clone(), b_re.clone(), b_im.clone(), c_re.clone(), c_im.clone(),
     );
 
@@ -65,4 +65,52 @@ fn test_selective_scan_vs_step_equivalence() {
 
     let y_sequential = Tensor::cat(y_step_list, 1);
     y_parallel.to_data().assert_approx_eq(&y_sequential.to_data(), 2);
+}
+
+#[test]
+fn test_mamba_block_forward_equivalence() {
+    type Backend = NdArray<f32>;
+    let device = Default::default();
+
+    let d_model = 16;
+    let seq_len = 8;
+    let d_state = 8;
+    let expand = 2;
+    let d_inner = d_model * expand;
+
+    let config = MambaConfig {
+        d_model,
+        d_state,
+        expand,
+    };
+
+    let block = MambaBlock::<Backend>::new(&config, &device);
+
+    let x = Tensor::<Backend, 3>::random([1, seq_len, d_model], burn::tensor::Distribution::Default, &device);
+
+    // 1. Full sequence forward
+    let y_parallel = block.forward(x.clone());
+
+    // 2. Step-by-step forward
+    let mut h_re = Tensor::<Backend, 3>::zeros([1, d_inner, d_state], &device);
+    let mut h_im = Tensor::<Backend, 3>::zeros([1, d_inner, d_state], &device);
+    let mut y_step_list = Vec::new();
+
+    for t in 0..seq_len {
+        let xt = x.clone().slice([0..1, t..t + 1]).squeeze::<2>(1);
+        let (yt, next_h) = block.forward_step(
+            xt,
+            ComplexTensor { re: h_re, im: h_im }
+        );
+
+        h_re = next_h.re;
+        h_im = next_h.im;
+        y_step_list.push(yt.unsqueeze_dim::<3>(1));
+    }
+
+    let y_sequential = Tensor::cat(y_step_list, 1);
+
+    // Compare
+    y_parallel.to_data().assert_approx_eq(&y_sequential.to_data(), 2);
+    println!("MambaBlock forward equivalence test passed!");
 }
