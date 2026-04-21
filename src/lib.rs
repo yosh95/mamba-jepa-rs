@@ -1,2 +1,2 @@
-pub mod mamba;
 pub mod jepa;
+pub mod mamba;

@@ -16,7 +16,7 @@ fn test_gradient_calculable() {
     let model = MambaBlock::<Backend>::new(&config, &device);
 
     let x = Tensor::<Backend, 3>::random([1, 4, 4], burn::tensor::Distribution::Default, &device);
-    
+
     let y = model.forward(x);
     let loss = y.sum();
     let grads = loss.backward();

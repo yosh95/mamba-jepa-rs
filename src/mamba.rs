@@ -2,7 +2,7 @@ use burn::config::Config;
 use burn::module::{Module, Param};
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::backend::Backend;
-use burn::tensor::{Tensor, Distribution};
+use burn::tensor::{Distribution, Tensor};
 
 #[derive(Config, Debug)]
 pub struct MambaConfig {
@@ -39,16 +39,20 @@ impl<B: Backend> MambaBlock<B> {
         // Projections
         let in_proj = LinearConfig::new(config.d_model, d_inner * 2).init(device);
         let out_proj = LinearConfig::new(d_inner, config.d_model).init(device);
-        
+
         // SSM Parameter Projections (Dynamic)
         let dt_proj = LinearConfig::new(d_inner, d_inner).init(device);
         let b_proj = LinearConfig::new(d_inner, d_state).init(device);
         let c_proj = LinearConfig::new(d_inner, d_state).init(device);
 
         // A is the system matrix, usually initialized with special patterns
-        let a_re = Tensor::random([d_inner, d_state], Distribution::Uniform(-1.0, -0.1), device);
+        let a_re = Tensor::random(
+            [d_inner, d_state],
+            Distribution::Uniform(-1.0, -0.1),
+            device,
+        );
         let a_im = Tensor::random([d_inner, d_state], Distribution::Default, device);
-        
+
         let d = Tensor::ones([d_inner], device);
 
         Self {
@@ -78,20 +82,20 @@ impl<B: Backend> MambaBlock<B> {
         // 2. Generate dynamic parameters (Selection Mechanism)
         // delta = softplus(dt_proj(u))
         let delta = burn::tensor::activation::softplus(self.dt_proj.forward(u.clone()), 1.0);
-        
-        // B and C can be complex or real. Here we simplify to real input for B,C 
+
+        // B and C can be complex or real. Here we simplify to real input for B,C
         // and treat them as complex with 0 imaginary part or just real.
         let b_raw = self.b_proj.forward(u.clone());
         let c_raw = self.c_proj.forward(u.clone());
-        
+
         // 3. Selective Scan
         let (y_ssm, _, _) = self.selective_scan(
-            u.clone(), 
-            delta, 
-            b_raw.clone(), 
+            u.clone(),
+            delta,
+            b_raw.clone(),
             Tensor::zeros(b_raw.dims(), device), // b_im
-            c_raw.clone(), 
-            Tensor::zeros(c_raw.dims(), device)  // c_im
+            c_raw.clone(),
+            Tensor::zeros(c_raw.dims(), device), // c_im
         );
 
         // 4. Gating and Output Projection
@@ -119,9 +123,15 @@ impl<B: Backend> MambaBlock<B> {
         let (y_ssm, next_h) = self.step(
             u,
             delta,
-            ComplexTensor { re: b_raw.clone(), im: Tensor::zeros_like(&b_raw) },
-            ComplexTensor { re: c_raw.clone(), im: Tensor::zeros_like(&c_raw) },
-            prev_h
+            ComplexTensor {
+                re: b_raw.clone(),
+                im: Tensor::zeros_like(&b_raw),
+            },
+            ComplexTensor {
+                re: c_raw.clone(),
+                im: Tensor::zeros_like(&c_raw),
+            },
+            prev_h,
         );
 
         // 4. Gating & Output
@@ -143,7 +153,7 @@ impl<B: Backend> MambaBlock<B> {
         let [_batch, _seq_len, _d_inner] = u.dims();
 
         // Discretization
-        let dt = delta.unsqueeze_dim::<4>(3); 
+        let dt = delta.unsqueeze_dim::<4>(3);
         let a_re = self.a_re.val().unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0);
         let a_im = self.a_im.val().unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0);
 
@@ -204,9 +214,17 @@ impl<B: Backend> MambaBlock<B> {
 
         let y = out_re + self.d.val().unsqueeze_dim::<2>(0) * u;
 
-        (y, ComplexTensor { re: next_h_re, im: next_h_im })
+        (
+            y,
+            ComplexTensor {
+                re: next_h_re,
+                im: next_h_im,
+            },
+        )
     }
 
+    /// Internal parallel scan implementation using Hillis-Steele algorithm.
+    #[doc(hidden)]
     pub fn parallel_scan(
         &self,
         alpha_re: Tensor<B, 4>,
@@ -214,85 +232,13 @@ impl<B: Backend> MambaBlock<B> {
         beta_re: Tensor<B, 4>,
         beta_im: Tensor<B, 4>,
     ) -> (Tensor<B, 4>, Tensor<B, 4>) {
-        let [batch, seq_len, _d_inner, _d_state] = alpha_re.dims();
-        let _device = &alpha_re.device();
+        let [_batch, seq_len, _d_inner, _d_state] = alpha_re.dims();
 
-        // If sequence is short, sequential scan is faster due to kernel launch overhead
-        if seq_len <= 16 {
+        if seq_len <= 8 {
             return self.sequential_scan_internal(alpha_re, alpha_im, beta_re, beta_im);
         }
 
-        // Chunked approach to reduce Tensor::cat calls
-        let chunk_size = 16;
-        let num_chunks = (seq_len + chunk_size - 1) / chunk_size;
-        
-        let mut chunk_alphas_re = Vec::with_capacity(num_chunks);
-        let mut chunk_alphas_im = Vec::with_capacity(num_chunks);
-        let mut chunk_betas_re = Vec::with_capacity(num_chunks);
-        let mut chunk_betas_im = Vec::with_capacity(num_chunks);
-        
-        let mut all_outputs_re = Vec::with_capacity(seq_len);
-        let mut all_outputs_im = Vec::with_capacity(seq_len);
-
-        // 1. Local scan within each chunk
-        for i in 0..num_chunks {
-            let start = i * chunk_size;
-            let end = usize::min(start + chunk_size, seq_len);
-            
-            let a_re = alpha_re.clone().slice([0..batch, start..end]);
-            let a_im = alpha_im.clone().slice([0..batch, start..end]);
-            let b_re = beta_re.clone().slice([0..batch, start..end]);
-            let b_im = beta_im.clone().slice([0..batch, start..end]);
-            
-            let (out_re, out_im) = self.sequential_scan_internal(a_re, a_im, b_re, b_im);
-            
-            // The last element of each local scan is the reduction of that chunk
-            let last_idx = out_re.dims()[1] - 1;
-            chunk_alphas_re.push(self.get_chunk_reduction(&alpha_re, start, end, true));
-            chunk_alphas_im.push(self.get_chunk_reduction(&alpha_im, start, end, false));
-            chunk_betas_re.push(out_re.clone().slice([0..batch, last_idx..last_idx+1]));
-            chunk_betas_im.push(out_im.clone().slice([0..batch, last_idx..last_idx+1]));
-            
-            all_outputs_re.push(out_re);
-            all_outputs_im.push(out_im);
-        }
-
-        // 2. Parallel scan on chunk reductions
-        let (scan_chunks_re, scan_chunks_im) = self.hillis_steele_scan(
-            Tensor::cat(chunk_alphas_re, 1),
-            Tensor::cat(chunk_alphas_im, 1),
-            Tensor::cat(chunk_betas_re, 1),
-            Tensor::cat(chunk_betas_im, 1),
-        );
-
-        // 3. Update chunks with previous chunk's carry-over
-        let mut final_re = Vec::with_capacity(num_chunks);
-        let mut final_im = Vec::with_capacity(num_chunks);
-        
-        final_re.push(all_outputs_re[0].clone());
-        final_im.push(all_outputs_im[0].clone());
-
-        for i in 1..num_chunks {
-            let prev_carry_re = scan_chunks_re.clone().slice([0..batch, (i-1)..i]);
-            let prev_carry_im = scan_chunks_im.clone().slice([0..batch, (i-1)..i]);
-            
-            // Each element in chunk = prev_carry * current_chunk_prefix_alpha + current_chunk_local_scan
-            // To do this efficiently, we need the prefix alphas within the chunk
-            let start = i * chunk_size;
-            let end = usize::min(start + chunk_size, seq_len);
-            let (prefix_alphas_re, prefix_alphas_im) = self.get_chunk_prefix_alphas(&alpha_re, &alpha_im, start, end);
-            
-            let local_re = all_outputs_re[i].clone();
-            let local_im = all_outputs_im[i].clone();
-            
-            let updated_re = (prefix_alphas_re.clone() * prev_carry_re.clone() - prefix_alphas_im.clone() * prev_carry_im.clone()) + local_re;
-            let updated_im = (prefix_alphas_re * prev_carry_im + prefix_alphas_im * prev_carry_re) + local_im;
-            
-            final_re.push(updated_re);
-            final_im.push(updated_im);
-        }
-
-        (Tensor::cat(final_re, 1), Tensor::cat(final_im, 1))
+        self.hillis_steele_scan(alpha_re, alpha_im, beta_re, beta_im)
     }
 
     fn sequential_scan_internal(
@@ -304,21 +250,22 @@ impl<B: Backend> MambaBlock<B> {
     ) -> (Tensor<B, 4>, Tensor<B, 4>) {
         let [batch, seq_len, d_inner, d_state] = alpha_re.dims();
         let device = &alpha_re.device();
-        
+
         let mut current_re = Tensor::zeros([batch, 1, d_inner, d_state], device);
         let mut current_im = Tensor::zeros([batch, 1, d_inner, d_state], device);
         let mut out_re = Vec::with_capacity(seq_len);
         let mut out_im = Vec::with_capacity(seq_len);
 
         for i in 0..seq_len {
-            let a_re = alpha_re.clone().slice([0..batch, i..i+1]);
-            let a_im = alpha_im.clone().slice([0..batch, i..i+1]);
-            let b_re = beta_re.clone().slice([0..batch, i..i+1]);
-            let b_im = beta_im.clone().slice([0..batch, i..i+1]);
+            let a_re = alpha_re.clone().slice([0..batch, i..i + 1]);
+            let a_im = alpha_im.clone().slice([0..batch, i..i + 1]);
+            let b_re = beta_re.clone().slice([0..batch, i..i + 1]);
+            let b_im = beta_im.clone().slice([0..batch, i..i + 1]);
 
-            let next_re = (a_re.clone() * current_re.clone() - a_im.clone() * current_im.clone()) + b_re;
+            let next_re =
+                (a_re.clone() * current_re.clone() - a_im.clone() * current_im.clone()) + b_re;
             let next_im = (a_re * current_im + a_im * current_re) + b_im;
-            
+
             out_re.push(next_re.clone());
             out_im.push(next_im.clone());
             current_re = next_re;
@@ -334,8 +281,9 @@ impl<B: Backend> MambaBlock<B> {
         mut out_beta_re: Tensor<B, 4>,
         mut out_beta_im: Tensor<B, 4>,
     ) -> (Tensor<B, 4>, Tensor<B, 4>) {
-        let [batch, seq_len, _, _] = out_alpha_re.dims();
+        let [batch, seq_len, _d_inner, _d_state] = out_alpha_re.dims();
         let mut offset = 1;
+
         while offset < seq_len {
             let left_indices = 0..(seq_len - offset);
             let right_indices = offset..seq_len;
@@ -352,58 +300,29 @@ impl<B: Backend> MambaBlock<B> {
 
             let res_alpha_re = a_re_r.clone() * a_re_l.clone() - a_im_r.clone() * a_im_l.clone();
             let res_alpha_im = a_re_r.clone() * a_im_l + a_im_r.clone() * a_re_l;
-            let res_beta_re = (a_re_r.clone() * b_re_l.clone() - a_im_r.clone() * b_im_l.clone()) + b_re_r;
+            let res_beta_re =
+                (a_re_r.clone() * b_re_l.clone() - a_im_r.clone() * b_im_l.clone()) + b_re_r;
             let res_beta_im = (a_re_r * b_im_l + a_im_r * b_re_l) + b_im_r;
 
-            out_alpha_re = Tensor::cat(vec![out_alpha_re.slice([0..batch, 0..offset]), res_alpha_re], 1);
-            out_alpha_im = Tensor::cat(vec![out_alpha_im.slice([0..batch, 0..offset]), res_alpha_im], 1);
-            out_beta_re = Tensor::cat(vec![out_beta_re.slice([0..batch, 0..offset]), res_beta_re], 1);
-            out_beta_im = Tensor::cat(vec![out_beta_im.slice([0..batch, 0..offset]), res_beta_im], 1);
+            out_alpha_re = Tensor::cat(
+                vec![out_alpha_re.slice([0..batch, 0..offset]), res_alpha_re],
+                1,
+            );
+            out_alpha_im = Tensor::cat(
+                vec![out_alpha_im.slice([0..batch, 0..offset]), res_alpha_im],
+                1,
+            );
+            out_beta_re = Tensor::cat(
+                vec![out_beta_re.slice([0..batch, 0..offset]), res_beta_re],
+                1,
+            );
+            out_beta_im = Tensor::cat(
+                vec![out_beta_im.slice([0..batch, 0..offset]), res_beta_im],
+                1,
+            );
 
             offset *= 2;
         }
         (out_beta_re, out_beta_im)
     }
-
-    fn get_chunk_reduction(&self, t: &Tensor<B, 4>, start: usize, end: usize, _is_re: bool) -> Tensor<B, 4> {
-        let [batch, _, _d_inner, _d_state] = t.dims();
-        let chunk = t.clone().slice([0..batch, start..end]);
-        let chunk_len = end - start;
-        
-        // This is a simplification: for alpha, we need the product of all elements in the chunk
-        let mut res = chunk.clone().slice([0..batch, 0..1]);
-        for j in 1..chunk_len {
-            res = res * chunk.clone().slice([0..batch, j..j+1]);
-        }
-        res
-    }
-
-    fn get_chunk_prefix_alphas(&self, alpha_re: &Tensor<B, 4>, alpha_im: &Tensor<B, 4>, start: usize, end: usize) -> (Tensor<B, 4>, Tensor<B, 4>) {
-        let [batch, _, d_inner, d_state] = alpha_re.dims();
-        let chunk_re = alpha_re.clone().slice([0..batch, start..end]);
-        let chunk_im = alpha_im.clone().slice([0..batch, start..end]);
-        let chunk_len = end - start;
-        
-        let mut out_re = Vec::with_capacity(chunk_len);
-        let mut out_im = Vec::with_capacity(chunk_len);
-        
-        let mut cur_re = Tensor::ones([batch, 1, d_inner, d_state], &alpha_re.device());
-        let mut cur_im = Tensor::zeros([batch, 1, d_inner, d_state], &alpha_re.device());
-        
-        for j in 0..chunk_len {
-            let a_re = chunk_re.clone().slice([0..batch, j..j+1]);
-            let a_im = chunk_im.clone().slice([0..batch, j..j+1]);
-            
-            let next_re = cur_re.clone() * a_re.clone() - cur_im.clone() * a_im.clone();
-            let next_im = cur_re * a_im + cur_im * a_re;
-            
-            out_re.push(next_re.clone());
-            out_im.push(next_im.clone());
-            cur_re = next_re;
-            cur_im = next_im;
-        }
-        
-        (Tensor::cat(out_re, 1), Tensor::cat(out_im, 1))
-    }
-
 }

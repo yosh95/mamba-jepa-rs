@@ -21,18 +21,40 @@ fn test_selective_scan_vs_step_equivalence() {
 
     let model = MambaBlock::<Backend>::new(&config, &device);
 
-    let u = Tensor::<Backend, 3>::random([1, seq_len, d_inner], burn::tensor::Distribution::Default, &device);
-    let delta = burn::tensor::activation::softplus(
-        Tensor::<Backend, 3>::random([1, seq_len, d_inner], burn::tensor::Distribution::Default, &device), 1.0
+    let u = Tensor::<Backend, 3>::random(
+        [1, seq_len, d_inner],
+        burn::tensor::Distribution::Default,
+        &device,
     );
-    let b_re = Tensor::<Backend, 3>::random([1, seq_len, d_state], burn::tensor::Distribution::Default, &device);
+    let delta = burn::tensor::activation::softplus(
+        Tensor::<Backend, 3>::random(
+            [1, seq_len, d_inner],
+            burn::tensor::Distribution::Default,
+            &device,
+        ),
+        1.0,
+    );
+    let b_re = Tensor::<Backend, 3>::random(
+        [1, seq_len, d_state],
+        burn::tensor::Distribution::Default,
+        &device,
+    );
     let b_im = Tensor::<Backend, 3>::zeros([1, seq_len, d_state], &device);
-    let c_re = Tensor::<Backend, 3>::random([1, seq_len, d_state], burn::tensor::Distribution::Default, &device);
+    let c_re = Tensor::<Backend, 3>::random(
+        [1, seq_len, d_state],
+        burn::tensor::Distribution::Default,
+        &device,
+    );
     let c_im = Tensor::<Backend, 3>::zeros([1, seq_len, d_state], &device);
 
     // 1. Parallel
     let (y_parallel, h_re_parallel, _h_im_parallel) = model.selective_scan(
-        u.clone(), delta.clone(), b_re.clone(), b_im.clone(), c_re.clone(), c_im.clone(),
+        u.clone(),
+        delta.clone(),
+        b_re.clone(),
+        b_im.clone(),
+        c_re.clone(),
+        c_im.clone(),
     );
 
     // 2. Sequential
@@ -49,22 +71,31 @@ fn test_selective_scan_vs_step_equivalence() {
         let ci = c_im.clone().slice([0..1, t..t + 1]).squeeze::<2>(1);
 
         let (yt, next_h) = model.step(
-            ut, dt,
+            ut,
+            dt,
             ComplexTensor { re: br, im: bi },
             ComplexTensor { re: cr, im: ci },
-            ComplexTensor { re: h_re_step, im: h_im_step },
+            ComplexTensor {
+                re: h_re_step,
+                im: h_im_step,
+            },
         );
 
         h_re_step = next_h.re.clone();
         h_im_step = next_h.im.clone();
         y_step_list.push(yt.unsqueeze_dim::<3>(1));
 
-        let hr_p = h_re_parallel.clone().slice([0..1, t..t + 1]).squeeze::<3>(1);
+        let hr_p = h_re_parallel
+            .clone()
+            .slice([0..1, t..t + 1])
+            .squeeze::<3>(1);
         hr_p.to_data().assert_approx_eq(&h_re_step.to_data(), 2);
     }
 
     let y_sequential = Tensor::cat(y_step_list, 1);
-    y_parallel.to_data().assert_approx_eq(&y_sequential.to_data(), 2);
+    y_parallel
+        .to_data()
+        .assert_approx_eq(&y_sequential.to_data(), 2);
 }
 
 #[test]
@@ -86,7 +117,11 @@ fn test_mamba_block_forward_equivalence() {
 
     let block = MambaBlock::<Backend>::new(&config, &device);
 
-    let x = Tensor::<Backend, 3>::random([1, seq_len, d_model], burn::tensor::Distribution::Default, &device);
+    let x = Tensor::<Backend, 3>::random(
+        [1, seq_len, d_model],
+        burn::tensor::Distribution::Default,
+        &device,
+    );
 
     // 1. Full sequence forward
     let y_parallel = block.forward(x.clone());
@@ -98,10 +133,7 @@ fn test_mamba_block_forward_equivalence() {
 
     for t in 0..seq_len {
         let xt = x.clone().slice([0..1, t..t + 1]).squeeze::<2>(1);
-        let (yt, next_h) = block.forward_step(
-            xt,
-            ComplexTensor { re: h_re, im: h_im }
-        );
+        let (yt, next_h) = block.forward_step(xt, ComplexTensor { re: h_re, im: h_im });
 
         h_re = next_h.re;
         h_im = next_h.im;
@@ -111,6 +143,8 @@ fn test_mamba_block_forward_equivalence() {
     let y_sequential = Tensor::cat(y_step_list, 1);
 
     // Compare
-    y_parallel.to_data().assert_approx_eq(&y_sequential.to_data(), 2);
+    y_parallel
+        .to_data()
+        .assert_approx_eq(&y_sequential.to_data(), 2);
     println!("MambaBlock forward equivalence test passed!");
 }
