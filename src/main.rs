@@ -15,11 +15,15 @@ fn main() {
         d_model: 32,
         d_state: 16,
         expand: 2,
+        n_heads: 4,
+        mimo_rank: 2,
+        use_conv: true,
+        conv_kernel: 4,
     };
     let input_dim = 2;
     let action_dim = 2;
     let seq_len = 32;
-    let batch_size = 2; // Testing multi-batch
+    let batch_size = 2;
     let epochs = 100;
 
     let mut model =
@@ -28,7 +32,7 @@ fn main() {
         AdamConfig::new().init::<MyAutodiffBackend, JepaWorldModel<MyAutodiffBackend>>();
 
     println!("==========================================================");
-    println!(" Improved Mamba-JEPA World Model (Multi-batch)");
+    println!(" Mamba-3-JEPA World Model (Multi-batch)");
     println!("==========================================================");
 
     // Training Loop
@@ -70,27 +74,37 @@ fn main() {
         model = optim.step(2e-3, model, grads);
     }
 
-    println!("\nPhase 2: Open-loop Imagination (Stateful, Batch Size = 2)");
+    println!("\nPhase 2: Open-loop Imagination (Mamba-3 Stateful)");
     let model_valid = model.valid();
 
-    // 1. Initial Observations
     let initial_obs = Tensor::<MyBackend, 3>::from_data(
         burn::tensor::TensorData::new(vec![1.0, 0.0, 0.8, 0.6], [batch_size, 1, 2]),
         &device,
     );
 
-    // 2. Encode to get initial latent and internal state
     let z_start = model_valid.encoder.forward(initial_obs);
-    let mut current_z = z_start.squeeze::<2>(1); // [batch, d_model]
+    let mut current_z = z_start.squeeze::<2>(1);
 
-    // Initialize SSM state with zeros
+    let d_inner = config.d_model * config.expand;
+    let d_head = d_inner / config.n_heads;
+
     let mut state = JepaState {
-        h_re: Tensor::zeros(
-            [batch_size, config.d_model * config.expand, config.d_state],
+        h: Tensor::zeros(
+            [
+                batch_size,
+                config.n_heads,
+                config.d_state,
+                d_head / config.mimo_rank,
+            ],
             &device,
         ),
-        h_im: Tensor::zeros(
-            [batch_size, config.d_model * config.expand, config.d_state],
+        prev_bx: Tensor::zeros(
+            [
+                batch_size,
+                config.n_heads,
+                config.d_state,
+                d_head / config.mimo_rank,
+            ],
             &device,
         ),
     };
@@ -102,7 +116,6 @@ fn main() {
             &device,
         );
 
-        // Predict next latent using the recurrent 'step' API
         let (next_z, next_state) = model_valid.step(current_z, action, state);
 
         current_z = next_z;

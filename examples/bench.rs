@@ -7,11 +7,7 @@ use mamba_jepa_rs::mamba::MambaConfig;
 use std::time::Instant;
 
 fn run_benchmark<B: AutodiffBackend>(device: B::Device, name: &str, epochs: usize) {
-    let config = MambaConfig {
-        d_model: 128,
-        d_state: 32,
-        expand: 2,
-    };
+    let config = MambaConfig::new(128, 32, 2, 8, 4);
     let input_dim = 64;
     let action_dim = 16;
     let seq_len = 64;

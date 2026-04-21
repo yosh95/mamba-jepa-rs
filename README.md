@@ -60,11 +60,6 @@ To run the full model benchmark:
 cargo run --example bench --release
 ```
 
-To profile the Parallel Associative Scan performance across different sequence lengths:
-```bash
-cargo run --example bench_scan --release
-```
-
 ### Optimization: Chunked Parallel Associative Scan
 Unlike naive RNN-style implementations, our Mamba block uses a **Chunked Parallel Associative Scan**. This reduces the computational complexity to $O(\log L)$ steps and optimizes memory bandwidth by grouping operations into chunks, minimizing expensive `Tensor::cat` operations on the GPU.
 

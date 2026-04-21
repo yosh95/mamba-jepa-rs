@@ -7,15 +7,11 @@ fn test_gradient_calculable() {
     type Backend = Autodiff<NdArray<f32>>;
     let device = Default::default();
 
-    let config = MambaConfig {
-        d_model: 4,
-        d_state: 4,
-        expand: 1,
-    };
+    let config = MambaConfig::new(16, 8, 2, 2, 1);
 
     let model = MambaBlock::<Backend>::new(&config, &device);
 
-    let x = Tensor::<Backend, 3>::random([1, 4, 4], burn::tensor::Distribution::Default, &device);
+    let x = Tensor::<Backend, 3>::random([1, 4, 16], burn::tensor::Distribution::Default, &device);
 
     let y = model.forward(x);
     let loss = y.sum();

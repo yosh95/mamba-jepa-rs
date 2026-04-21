@@ -1,4 +1,4 @@
-use crate::mamba::{ComplexTensor, MambaBlock, MambaConfig};
+use crate::mamba::{MambaBlock, MambaConfig};
 use burn::module::Module;
 use burn::nn::{Linear, LinearConfig};
 use burn::tensor::backend::Backend;
@@ -6,8 +6,8 @@ use burn::tensor::Tensor;
 
 #[derive(Clone)]
 pub struct JepaState<B: Backend> {
-    pub h_re: Tensor<B, 3>,
-    pub h_im: Tensor<B, 3>,
+    pub h: Tensor<B, 4>,
+    pub prev_bx: Tensor<B, 4>,
 }
 
 #[derive(Module, Debug)]
@@ -61,7 +61,6 @@ impl<B: Backend> JepaWorldModel<B> {
         action: Tensor<B, 2>,
         state: JepaState<B>,
     ) -> (Tensor<B, 2>, JepaState<B>) {
-        // Fix: Use unsqueeze(1) and squeeze(1) to handle batch dimension correctly
         let a = self
             .action_encoder
             .forward(action.unsqueeze_dim::<3>(1))
@@ -69,19 +68,13 @@ impl<B: Backend> JepaWorldModel<B> {
         let u_concat = Tensor::cat(vec![z_prev, a], 1);
         let u = self.fusion.forward(u_concat);
 
-        let (y, next_h) = self.mamba.forward_step(
-            u,
-            ComplexTensor {
-                re: state.h_re,
-                im: state.h_im,
-            },
-        );
+        let (y, next_h, current_bx) = self.mamba.forward_step(u, state.h, Some(state.prev_bx));
 
         (
             y,
             JepaState {
-                h_re: next_h.re,
-                h_im: next_h.im,
+                h: next_h,
+                prev_bx: current_bx,
             },
         )
     }
@@ -130,7 +123,6 @@ pub fn sigreg_loss<B: Backend>(z: Tensor<B, 3>, n_projections: usize) -> Tensor<
         let sq_j = xm_sq.clone().transpose();
 
         let dist_sq = (sq_i + sq_j) - dot.mul_scalar(2.0);
-        // Add clamp_min for numerical stability
         let dist_sq = dist_sq.clamp_min(0.0);
 
         let term1 = dist_sq.mul_scalar(-0.5).exp().mean();
