@@ -111,9 +111,9 @@ impl<B: Backend> LatentPredictor<B> {
         pred_z: Tensor<B, 3>,
         stability_weight: f64,
     ) -> Tensor<B, 1> {
-        let [batch, seq_len, d_model] = z.dims();
-        let target_z = z.clone().detach().slice([0..batch, 1..seq_len, 0..d_model]);
-        let pred_slice = pred_z.slice([0..batch, 0..(seq_len - 1), 0..d_model]);
+        let [batch, seq_len, _] = z.dims();
+        let target_z = z.clone().detach().slice([0..batch, 1..seq_len]);
+        let pred_slice = pred_z.slice([0..batch, 0..seq_len - 1]);
 
         let mse_loss = (target_z - pred_slice).powf_scalar(2.0).mean();
 
@@ -134,7 +134,8 @@ pub fn stability_loss<B: Backend>(z: Tensor<B, 3>, w: Tensor<B, 2>) -> Tensor<B,
 
     // Calculate statistics for each projection dimension (O(T) complexity)
     let mean = projections.clone().mean_dim(1); // [batch, 1, n_projections]
-    let var = projections.var(1); // [batch, 1, n_projections]
+    // Manual variance calculation as projections.var(1) can be slow on some backends
+    let var = (projections - mean.clone()).powf_scalar(2.0).mean_dim(1);
 
     // Penalize deviation from standard normal distribution (mean=0, var=1)
     let loss_mean = mean.powf_scalar(2.0).mean();
