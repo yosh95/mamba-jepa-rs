@@ -5,17 +5,29 @@ use burn::tensor::Tensor;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use ssm_latent_model::latent::{LatentPredictor, LatentState};
 use ssm_latent_model::ssm::SsmConfig;
+use std::thread::sleep;
+use std::time::Duration;
 
 type MyBackend = NdArray<f32>;
 type MyAutodiffBackend = Autodiff<MyBackend>;
 
 fn main() {
     let device = NdArrayDevice::default();
-    let mut rng = StdRng::seed_from_u64(42); // Fixed seed for reproducibility
+    let mut rng = StdRng::seed_from_u64(42);
+
+    println!("==========================================================");
+    println!("     📖 The Chronicles of the Digital Explorer");
+    println!("==========================================================");
+    sleep(Duration::from_millis(500));
+
+    // --- Part 1: The Encounter ---
+    println!("\n[Part 1: The Encounter]");
+    println!("The Explorer is placed in a world where a mysterious signal pulses.");
+    println!("It sees observations (x, y) that seem to dance in circles...");
 
     let config = SsmConfig {
-        d_model: 32,
-        d_state: 16,
+        d_model: 64,
+        d_state: 32,
         expand: 2,
         n_heads: 4,
         mimo_rank: 2,
@@ -26,34 +38,40 @@ fn main() {
     let action_dim = 2;
     let seq_len = 32;
     let batch_size = 2;
-    let epochs = 100;
+    let epochs = 60;
 
-    let mut model =
+    let mut explorer =
         LatentPredictor::<MyAutodiffBackend>::new(&config, input_dim, action_dim, &device);
-    let mut optim =
+    let mut brain_optimizer =
         AdamConfig::new().init::<MyAutodiffBackend, LatentPredictor<MyAutodiffBackend>>();
 
-    println!("==========================================================");
-    println!(" Latent SSM Predictor (Reproducible Mode)");
-    println!("==========================================================");
+    // --- Part 2: Dreaming ---
+    println!("\n[Part 2: Dreaming]");
+    println!("The Explorer closes its eyes and begins to 'dream' about the data.");
+    println!(
+        "It tries to condense the messy observations into a 'Latent Space'—its own mental map."
+    );
+    println!("Learning the laws of physics that govern this world...");
 
-    // Training Loop
     for epoch in 1..=epochs {
         let mut obs_vec = Vec::new();
         let mut act_vec = Vec::new();
 
         for b in 0..batch_size {
-            let offset = (b as f32) * 0.5 + (epoch as f32) * 0.01;
+            let phase_shift = (b as f32) * 0.78 + (epoch as f32) * 0.005;
             for t in 0..seq_len {
-                let angle = (t as f32) * 0.3 + offset;
-                let noise_obs: f32 = rng.gen_range(-0.005..0.005);
-                let noise_act: f32 = rng.gen_range(-0.005..0.005);
+                let time = (t as f32) * 0.25;
+                let angle = time + phase_shift;
 
-                obs_vec.extend_from_slice(&[angle.cos() + noise_obs, angle.sin() + noise_obs]);
-                act_vec.extend_from_slice(&[
-                    -(angle.sin()) * 0.1 + noise_act,
-                    angle.cos() * 0.1 + noise_act,
-                ]);
+                // Observations: A noisy circle
+                let noise: f32 = rng.gen_range(-0.01..0.01);
+                obs_vec.push(angle.cos() + noise);
+                obs_vec.push(angle.sin() + noise);
+
+                // Actions: Small impulses that maintain the circular motion
+                let act_noise: f32 = rng.gen_range(-0.005..0.005);
+                act_vec.push(-0.1 * angle.sin() + act_noise);
+                act_vec.push(0.1 * angle.cos() + act_noise);
             }
         }
 
@@ -66,34 +84,42 @@ fn main() {
             &device,
         );
 
-        let (z, predicted_z) = model.forward(obs_data, action_data);
-        let loss = model.loss(z.clone(), predicted_z, 1.0);
+        let (z, predicted_z) = explorer.forward(obs_data, action_data);
+        let loss = explorer.loss(z, predicted_z, 1.5);
 
-        if epoch % 50 == 0 || epoch == 1 {
-            let z_var = z.clone().var(0).mean().into_data();
+        let current_loss: f32 = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
+
+        if epoch % 20 == 0 {
             println!(
-                "Epoch {:3}: Total Loss = {:?}, Latent Variance = {:?}",
-                epoch,
-                loss.clone().into_data(),
-                z_var
+                "  Dream Epoch {:3}: The world is becoming clearer... (Loss: {:.6})",
+                epoch, current_loss
             );
         }
 
         let grads = loss.backward();
-        let grads = GradientsParams::from_grads(grads, &model);
-        model = optim.step(2e-3, model, grads);
+        let grads = GradientsParams::from_grads(grads, &explorer);
+        explorer = brain_optimizer.step(1.5e-3, explorer, grads);
     }
 
-    println!("\nPhase 2: Sequence Prediction");
-    let model_valid = model.valid();
+    println!("The Explorer has finished learning. It now possesses a 'World Model'.");
+    sleep(Duration::from_millis(800));
 
+    // --- Part 3: Imagination ---
+    println!("\n[Part 3: Pure Imagination]");
+    println!("Now, we take away the observations. The Explorer is blind.");
+    println!("Starting from a single memory, it will 'imagine' the future by its own will.");
+
+    let explorer_valid = explorer.valid();
+
+    // Initial memory: Explorer remembers where it was
+    let start_pos = vec![1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]; // Multiple batch samples
     let initial_obs = Tensor::<MyBackend, 3>::from_data(
-        burn::tensor::TensorData::new(vec![1.0, 0.0, 0.8, 0.6], [batch_size, 1, 2]),
+        burn::tensor::TensorData::new(start_pos, [batch_size, 1, 2]),
         &device,
     );
 
-    let z_start = model_valid.encode(initial_obs);
-    let mut current_z = z_start.squeeze::<2>(1);
+    let z_memory = explorer_valid.encode(initial_obs);
+    let mut current_latent = z_memory.squeeze::<2>(1);
 
     let d_inner = config.d_model * config.expand;
     let d_head = d_inner / config.n_heads;
@@ -119,22 +145,43 @@ fn main() {
         },
     };
 
-    println!("Starting prediction from z[0]...");
-    for t in 1..=5 {
+    println!("\nGenerating 10 steps of future 'hallucination'...");
+    println!("--------------------------------------------------");
+
+    for t in 1..=10 {
+        // The Explorer decides its own actions (or we give it commands)
+        // Here, we give it commands to keep moving in a circle
+        let angle = (t as f32) * 0.25;
+        let action_val = vec![-0.1 * angle.sin(), 0.1 * angle.cos()];
+        let mut batch_actions = Vec::new();
+        for _ in 0..batch_size {
+            batch_actions.extend_from_slice(&action_val);
+        }
+
         let action = Tensor::<MyBackend, 2>::from_data(
-            burn::tensor::TensorData::new(vec![0.0, 0.1, 0.0, 0.1], [batch_size, 2]),
+            burn::tensor::TensorData::new(batch_actions, [batch_size, 2]),
             &device,
         );
 
-        let (next_z, next_state) = model_valid.step(current_z, action, state);
+        // One step of internal simulation
+        let (next_latent, next_state) = explorer_valid.step(current_latent, action, state);
 
-        current_z = next_z;
+        current_latent = next_latent;
         state = next_state;
 
+        // We can't see the world, but we can look at its internal representation
+        // (Just showing the first few dimensions of its 'thoughts')
+        let thoughts = current_latent.clone().slice([0..1, 0..4]).into_data();
+        let thoughts_slice: &[f32] = thoughts.as_slice().unwrap();
+
         println!(
-            "Step {}: z_hat[0] (first 3 dims): {:?}",
-            t,
-            current_z.clone().slice([0..1, 0..3]).into_data()
+            "Step {:2}: Thought Trace -> [{:+.4}, {:+.4}, {:+.4}, {:+.4}]",
+            t, thoughts_slice[0], thoughts_slice[1], thoughts_slice[2], thoughts_slice[3]
         );
+        sleep(Duration::from_millis(100));
     }
+
+    println!("--------------------------------------------------");
+    println!("The Explorer successfully traversed the unknown using only its mind.");
+    println!("This is the power of a World Model: Internalizing reality to navigate the future.");
 }
