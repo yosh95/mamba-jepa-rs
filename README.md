@@ -2,6 +2,8 @@
 
 Rust implementation of a latent state predictor leveraging State Space Models (SSM).
 
+![World Model Demo](images/world_model.gif)
+
 ## Features
 
 - **SSM Dynamics**: Efficient sequence modeling using state space principles.
@@ -22,10 +24,10 @@ cargo build
 Run the demonstration script:
 
 ```bash
-cargo run
+cargo run --release
 ```
 
-This demo trains a model to predict the next state of a simple dynamical system in latent space.
+This demo trains a world model to predict and "imagine" the future states of a dynamical system in latent space.
 
 ## Testing
 

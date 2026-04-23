@@ -1,8 +1,8 @@
 use crate::ssm::{SsmBlock, SsmConfig};
 use burn::module::{Module, Param};
 use burn::nn::{Linear, LinearConfig};
-use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
+use burn::tensor::backend::Backend;
 
 #[derive(Clone)]
 pub struct LatentState<B: Backend> {
@@ -14,6 +14,7 @@ pub struct LatentState<B: Backend> {
 #[derive(Module, Debug)]
 pub struct LatentPredictor<B: Backend> {
     encoder: Linear<B>,
+    decoder: Linear<B>,
     action_encoder: Linear<B>,
     fusion: Linear<B>,
     ssm: SsmBlock<B>,
@@ -30,6 +31,7 @@ impl<B: Backend> LatentPredictor<B> {
         device: &B::Device,
     ) -> Self {
         let encoder = LinearConfig::new(input_dim, config.d_model).init(device);
+        let decoder = LinearConfig::new(config.d_model, input_dim).init(device);
         let action_encoder = LinearConfig::new(action_dim, config.d_model).init(device);
         let fusion = LinearConfig::new(config.d_model * 2, config.d_model).init(device);
         let ssm = SsmBlock::new(config, device);
@@ -52,6 +54,7 @@ impl<B: Backend> LatentPredictor<B> {
 
         Self {
             encoder,
+            decoder,
             action_encoder,
             fusion,
             ssm,
@@ -65,17 +68,22 @@ impl<B: Backend> LatentPredictor<B> {
         self.encoder.forward(observations)
     }
 
+    pub fn decode(&self, z: Tensor<B, 3>) -> Tensor<B, 3> {
+        self.decoder.forward(z)
+    }
+
     pub fn forward(
         &self,
         observations: Tensor<B, 3>,
         actions: Tensor<B, 3>,
-    ) -> (Tensor<B, 3>, Tensor<B, 3>) {
+    ) -> (Tensor<B, 3>, Tensor<B, 3>, Tensor<B, 3>) {
         let z = self.encoder.forward(observations);
         let a = self.action_encoder.forward(actions);
         let u_concat = Tensor::cat(vec![z.clone(), a], 2);
         let u = self.fusion.forward(u_concat);
         let predicted_z = self.ssm.forward(u);
-        (z, predicted_z)
+        let reconstructed_x = self.decoder.forward(z.clone());
+        (z, predicted_z, reconstructed_x)
     }
 
     pub fn step(
@@ -87,7 +95,7 @@ impl<B: Backend> LatentPredictor<B> {
         let a = self
             .action_encoder
             .forward(action.unsqueeze_dim::<3>(1))
-            .squeeze::<2>(1);
+            .squeeze::<2>();
         let u_concat = Tensor::cat(vec![z_prev, a], 1);
         let u = self.fusion.forward(u_concat);
 
@@ -109,18 +117,21 @@ impl<B: Backend> LatentPredictor<B> {
         &self,
         z: Tensor<B, 3>,
         pred_z: Tensor<B, 3>,
+        reconstructed_x: Tensor<B, 3>,
+        original_x: Tensor<B, 3>,
         stability_weight: f64,
     ) -> Tensor<B, 1> {
         let [batch, seq_len, _] = z.dims();
         let target_z = z.clone().detach().slice([0..batch, 1..seq_len]);
         let pred_slice = pred_z.slice([0..batch, 0..seq_len - 1]);
 
-        let mse_loss = (target_z - pred_slice).powf_scalar(2.0).mean();
+        let mse_latent = (target_z - pred_slice).powf_scalar(2.0).mean();
+        let mse_recons = (original_x - reconstructed_x).powf_scalar(2.0).mean();
 
         // Efficient O(T) stability loss via Gaussian moment matching
         let reg_loss = stability_loss(z, self.stability_projections.val());
 
-        mse_loss + reg_loss.mul_scalar(stability_weight)
+        mse_latent + mse_recons + reg_loss.mul_scalar(stability_weight)
     }
 }
 

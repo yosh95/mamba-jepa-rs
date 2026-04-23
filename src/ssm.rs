@@ -189,7 +189,8 @@ impl<B: Backend> SsmBlock<B> {
                 .unsqueeze_dim::<5>(0);
 
         let dt = delta.clone().unsqueeze_dim::<4>(3);
-        let da_re = (self.a_re.val().unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0) * dt.clone()).exp();
+        let da_re =
+            (self.a_re.val().unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0) * dt.clone()).exp();
         let da_im = self.a_im.val().unsqueeze_dim::<3>(0).unsqueeze_dim::<4>(0) * dt;
 
         let theta_rot = theta.reshape([batch, seq_len, n_heads, d_state / 2]);
@@ -233,7 +234,9 @@ impl<B: Backend> SsmBlock<B> {
         );
         let w = delta_lambda * bx + beta * bx_prev;
 
-        let w0 = w.clone().slice([0..batch, 0..seq_len, 0..n_heads, 0..d_state / 2]);
+        let w0 = w
+            .clone()
+            .slice([0..batch, 0..seq_len, 0..n_heads, 0..d_state / 2]);
         let w1 = w.slice([0..batch, 0..seq_len, 0..n_heads, d_state / 2..d_state]);
 
         let (h_re, h_im) = self.parallel_scan(a00, a01, a10, a11, w0, w1);
@@ -296,7 +299,6 @@ impl<B: Backend> SsmBlock<B> {
         (w0, w1)
     }
 
-
     /// Sequential forward step for autoregressive inference
     pub fn forward_step(
         &self,
@@ -323,7 +325,7 @@ impl<B: Backend> SsmBlock<B> {
             });
             let x_conv = Tensor::cat(vec![current_conv_state, u_orig.unsqueeze_dim::<3>(2)], 2);
             (
-                conv.forward(x_conv.clone()).squeeze::<2>(2),
+                conv.forward(x_conv.clone()).squeeze::<2>(),
                 Some(x_conv.slice([0..batch, 0..d_inner, 1..kernel_size])),
             )
         } else {

@@ -36,7 +36,7 @@ fn test_ssm_block_forward_equivalence_multi_batch() {
     let mut y_step_list = Vec::new();
 
     for t in 0..seq_len {
-        let xt = x.clone().slice([0..batch, t..t + 1]).squeeze::<2>(1);
+        let xt = x.clone().slice([0..batch, t..t + 1]).squeeze::<2>();
         let (yt, next_h, current_bx, next_conv_state) =
             block.forward_step(xt, h, prev_bx, conv_state);
 
@@ -50,5 +50,5 @@ fn test_ssm_block_forward_equivalence_multi_batch() {
 
     y_parallel
         .to_data()
-        .assert_approx_eq(&y_sequential.to_data(), 3);
+        .assert_approx_eq::<f32>(&y_sequential.to_data(), Default::default());
 }

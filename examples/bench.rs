@@ -1,7 +1,7 @@
-use burn::backend::{ndarray::NdArrayDevice, wgpu::WgpuDevice, Autodiff, NdArray, Wgpu};
+use burn::backend::{Autodiff, NdArray, Wgpu, ndarray::NdArrayDevice, wgpu::WgpuDevice};
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::Tensor;
+use burn::tensor::backend::AutodiffBackend;
 use ssm_latent_model::latent::LatentPredictor;
 use ssm_latent_model::ssm::SsmConfig;
 use std::time::Instant;
@@ -74,5 +74,5 @@ fn main() {
     run_benchmark::<Autodiff<NdArray<f32>>>(NdArrayDevice::Cpu, "NdArray (CPU)", epochs);
 
     println!("\n--- GPU Benchmark (Wgpu) ---");
-    run_benchmark::<Autodiff<Wgpu>>(WgpuDevice::BestAvailable, "Wgpu (GPU)", epochs);
+    run_benchmark::<Autodiff<Wgpu>>(WgpuDevice::default(), "Wgpu (GPU)", epochs);
 }

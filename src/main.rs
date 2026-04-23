@@ -1,18 +1,19 @@
-use burn::backend::{ndarray::NdArrayDevice, Autodiff, NdArray};
+#![recursion_limit = "256"]
+use burn::backend::{Autodiff, Wgpu, wgpu::WgpuDevice};
 use burn::module::AutodiffModule;
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::Tensor;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use ssm_latent_model::latent::{LatentPredictor, LatentState};
 use ssm_latent_model::ssm::SsmConfig;
 use std::thread::sleep;
 use std::time::Duration;
 
-type MyBackend = NdArray<f32>;
+type MyBackend = Wgpu;
 type MyAutodiffBackend = Autodiff<MyBackend>;
 
 fn main() {
-    let device = NdArrayDevice::default();
+    let device = WgpuDevice::default();
     let mut rng = StdRng::seed_from_u64(42);
 
     println!("==========================================================");
@@ -64,12 +65,12 @@ fn main() {
                 let angle = time + phase_shift;
 
                 // Observations: A noisy circle
-                let noise: f32 = rng.gen_range(-0.01..0.01);
+                let noise: f32 = rng.random_range(-0.01..0.01);
                 obs_vec.push(angle.cos() + noise);
                 obs_vec.push(angle.sin() + noise);
 
                 // Actions: Small impulses that maintain the circular motion
-                let act_noise: f32 = rng.gen_range(-0.005..0.005);
+                let act_noise: f32 = rng.random_range(-0.005..0.005);
                 act_vec.push(-0.1 * angle.sin() + act_noise);
                 act_vec.push(0.1 * angle.cos() + act_noise);
             }
@@ -84,8 +85,8 @@ fn main() {
             &device,
         );
 
-        let (z, predicted_z) = explorer.forward(obs_data, action_data);
-        let loss = explorer.loss(z, predicted_z, 1.5);
+        let (z, predicted_z, reconstructed_x) = explorer.forward(obs_data.clone(), action_data);
+        let loss = explorer.loss(z, predicted_z, reconstructed_x, obs_data, 1.5);
 
         let current_loss: f32 = loss.clone().into_data().as_slice::<f32>().unwrap()[0];
 
@@ -112,14 +113,18 @@ fn main() {
     let explorer_valid = explorer.valid();
 
     // Initial memory: Explorer remembers where it was
-    let start_pos = vec![1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]; // Multiple batch samples
+    let mut start_pos = Vec::with_capacity(batch_size * 2);
+    for _ in 0..batch_size {
+        start_pos.push(1.0);
+        start_pos.push(0.0);
+    }
     let initial_obs = Tensor::<MyBackend, 3>::from_data(
         burn::tensor::TensorData::new(start_pos, [batch_size, 1, 2]),
         &device,
     );
 
     let z_memory = explorer_valid.encode(initial_obs);
-    let mut current_latent = z_memory.squeeze::<2>(1);
+    let mut current_latent = z_memory.squeeze::<2>();
 
     let d_inner = config.d_model * config.expand;
     let d_head = d_inner / config.n_heads;
@@ -145,14 +150,13 @@ fn main() {
         },
     };
 
-    println!("\nGenerating 10 steps of future 'hallucination'...");
+    println!("\nGenerating 20 steps of future 'hallucination'...");
     println!("--------------------------------------------------");
 
-    for t in 1..=10 {
+    for t in 1..=20 {
         // The Explorer decides its own actions (or we give it commands)
-        // Here, we give it commands to keep moving in a circle
-        let angle = (t as f32) * 0.25;
-        let action_val = vec![-0.1 * angle.sin(), 0.1 * angle.cos()];
+        let angle = (t as f32) * 0.4;
+        let action_val = vec![-0.2 * angle.sin(), 0.2 * angle.cos()];
         let mut batch_actions = Vec::new();
         for _ in 0..batch_size {
             batch_actions.extend_from_slice(&action_val);
@@ -169,16 +173,38 @@ fn main() {
         current_latent = next_latent;
         state = next_state;
 
-        // We can't see the world, but we can look at its internal representation
-        // (Just showing the first few dimensions of its 'thoughts')
-        let thoughts = current_latent.clone().slice([0..1, 0..4]).into_data();
-        let thoughts_slice: &[f32] = thoughts.as_slice().unwrap();
+        // Decode the 'thought' back into the physical world (x, y)
+        let decoded = explorer_valid.decode(current_latent.clone().unsqueeze_dim::<3>(1));
+        let pos = decoded.into_data();
+        let pos_slice: &[f32] = pos.as_slice().unwrap();
+        let x = pos_slice[0];
+        let y = pos_slice[1];
 
-        println!(
-            "Step {:2}: Thought Trace -> [{:+.4}, {:+.4}, {:+.4}, {:+.4}]",
-            t, thoughts_slice[0], thoughts_slice[1], thoughts_slice[2], thoughts_slice[3]
-        );
-        sleep(Duration::from_millis(100));
+        // ASCII Visualization
+        let width = 30;
+        let height = 15;
+        let mut grid = vec![vec![' '; width]; height];
+        
+        // Draw axes
+        for i in 0..width { grid[height/2][i] = '-'; }
+        for i in 0..height { grid[i][width/2] = '|'; }
+        grid[height/2][width/2] = '+';
+
+        let gx = (((x + 1.5) / 3.0) * (width as f32 - 1.0)) as i32;
+        let gy = (((1.5 - y) / 3.0) * (height as f32 - 1.0)) as i32;
+
+        if gx >= 0 && gx < width as i32 && gy >= 0 && gy < height as i32 {
+            grid[gy as usize][gx as usize] = 'O';
+        }
+
+        println!("\x1B[H\x1B[2J"); // Clear screen
+        println!("Step {:2}: Mental Map Projection (x={:+.2}, y={:+.2})", t, x, y);
+        for row in grid {
+            let s: String = row.into_iter().collect();
+            println!("  {}", s);
+        }
+        
+        sleep(Duration::from_millis(150));
     }
 
     println!("--------------------------------------------------");
