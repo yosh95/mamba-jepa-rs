@@ -204,7 +204,12 @@ fn main() {
     println!("It will 'imagine' the future solely based on its internal world model.");
     sleep(Duration::from_millis(1500));
 
-    run_demo(&explorer.valid(), &config, &device, &format!("Final World Model (Epoch {})", epochs));
+    run_demo(
+        &explorer.valid(),
+        &config,
+        &device,
+        &format!("Final World Model (Epoch {})", epochs),
+    );
 
     println!("--------------------------------------------------");
     println!("The Explorer successfully traversed the unknown using only its mind.");
