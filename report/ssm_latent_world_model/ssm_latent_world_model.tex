@@ -1,0 +1,1103 @@
+\documentclass[11pt,a4paper]{ltjsarticle}
+
+\usepackage{luatexja}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{positioning, arrows.meta, shapes.geometric, calc, fit, backgrounds}
+
+\geometry{margin=25mm}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+% ---- color definitions ----
+\definecolor{ssmblue}{RGB}{74,144,226}
+\definecolor{ssmorange}{RGB}{245,166,35}
+\definecolor{ssmgreen}{RGB}{80,180,80}
+\definecolor{ssmred}{RGB}{220,80,80}
+\definecolor{ssmpurple}{RGB}{150,100,200}
+
+\title{
+  エッジデバイス向け軽量世界モデルの産業適用に関する調査レポート\\
+  {\large --- Mamba-JEPA統合アーキテクチャとRust/WASM実装を事例として ---}
+}
+
+\author{
+  安藤 義裕\\
+  \href{mailto:yosh5295@gmail.com}{yosh5295@gmail.com}
+}
+\date{2026年4月30日}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本レポートは、State Space Model（SSM）とJoint Embedding Predictive Architecture（JEPA）を統合した
+軽量世界モデル\texttt{ssm-latent-rs}の技術的特徴を分析し、その産業適用の有効性を検討するものである。
+2024--2026年にかけて、世界モデルはAI研究の最前線として急速に注目を集め、
+Google DeepMind Genie~3、NVIDIA Cosmos、Meta V-JEPA~2、Runway GWM-1などの
+大規模システムが相次いでリリースされた。
+しかし、これらはGPUクラスタを前提とする大規模システムであり、エッジデバイスやブラウザ上で
+リアルタイム動作やオンデバイス学習を明示的に志向した軽量世界モデル実装は、少なくとも公開実装としてはまだ限られている。
+\texttt{ssm-latent-rs}は、RustとBurnフレームワークによるSSM+JEPA統合アーキテクチャを実装し、
+小規模デモにおいて、CPU単体・ブラウザ上でのオンライン学習と予測を実証している。
+本レポートでは、当該実装の技術的詳細を分析した上で、
+予知保全、ロボット制御、デジタルツイン軽量化、オンデバイスプライバシーAIの4領域における
+産業適用の有効性と導入上の留意点を論じる。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%=============================================================
+\section{背景}
+%=============================================================
+
+\subsection{世界モデルの定義と意義}
+
+世界モデル（World Model）とは、環境の内部表現を学習し、
+その表現を用いて未来の状態を予測・シミュレーションするAIシステムである\cite{ha2018world}。
+言語モデルが次のトークンを予測するのに対し、世界モデルは次の\textbf{状況の配置}を予測する。
+
+この区別は実用上極めて重要である。
+一般的な言語モデル単体は、入力に対する応答生成には優れる一方で、
+世界の状態を明示的に保持し（persistent state）、
+物理制約を一貫して扱い（physical consistency）、
+閉ループで計画し（closed-loop planning）、
+行動の結果を予測する（action-conditioned prediction）ためには、追加の記憶・推論・環境モデルが必要となる。
+Kanazawaは、
+「連続入力を受け取り、世界理解を更新し、それに応じて行動できる
+知覚システムをどう構築するかが、AGIなしでは解決できない大きな未解決問題である」
+と述べている\cite{scientificamerican2026worldmodel}。
+
+世界モデルは、LeCunが2022年のポジションペーパーで
+「物理世界を理解し、持続的記憶を持ち、推論し、複雑な行動系列を計画できるシステム」
+の基盤として位置づけている\cite{lecun2022ami}。
+LeCunは2025年11月にMetaを離れ、AMI Labsを立ち上げ、
+2026年には約$10$億ドル規模の資金調達を発表したと報じられている\cite{notboring2026worldmodels}。
+Fei-Fei LiのWorld Labsも大規模な資金調達を行い、
+同様に空間知能と3D世界モデルに注力している。
+
+\subsection{2024--2026年の大規模世界モデルの展開}
+
+2024年から2026年にかけて、主要テクノロジー企業が相次いで世界モデルをリリースした。
+表\ref{tab:world_model_systems}に代表的なシステムを整理する。
+
+{\small
+\setlength{\tabcolsep}{3pt}
+\begin{longtable}{p{24mm}p{22mm}p{102mm}}
+\toprule
+システム & 開発元 & 概要 \\
+\midrule
+\endhead
+Genie 3 & Google DeepMind & テキストからリアルタイムに対話的3D世界を生成。720p / 24fps。2025年8月発表、2026年1月Project Genieとして一部ユーザー向けに公開\cite{deepmind2025genie3,google2026projectgenie} \\
+\midrule
+Waymo World Model & Waymo & Genie系の世界モデルを自動運転シミュレーションへ応用する方向性の例。希少なエッジケース生成に利用されると報じられている\cite{nature2026worldmodels} \\
+\midrule
+Cosmos / Cosmos Policy & NVIDIA & オープン重みの世界基盤モデル。Cosmos Policyはロボット制御に適応しLIBEROベンチマークでSOTA達成\cite{nvidiacosmospolicy} \\
+\midrule
+V-JEPA 2 & Meta & 自己教師あり動画モデル。100万時間以上の動画から事前学習し、62時間未満のロボット動画で事後学習したV-JEPA 2-ACにより、タスクにより65--80\%程度のゼロショット操作成功率を報告\cite{vjepa2} \\
+\midrule
+GWM-1 & Runway & 汎用世界モデルファミリ。リアルタイム、対話的、制御可能。世界・アバタ・ロボティクスの3変種\cite{gwm1} \\
+\midrule
+SIMA 2 & Google DeepMind & Geminiバックボーン+世界モデルによる汎用エージェント。3Dゲーム環境で自律的にプレイ・学習\cite{notboring2026worldmodels} \\
+\midrule
+Motubrain & ShengShu & 統合世界アクションモデル。1つの学習でVLA・世界モデル・動画生成・IDM・予測を同時達成\cite{motubrain} \\
+\midrule
+GAIA-2 & Wayve & 制御可能なマルチカメラ運転世界モデル。レアシナリオの大規模生成\cite{graison2026worldmodels} \\
+\bottomrule
+\caption{2024--2026年の主要世界モデルシステム}
+\label{tab:world_model_systems}
+\end{longtable}
+}
+
+これらのシステムに共通する特徴は、(1)大規模GPUを前提とすること、(2)大量の動画データによる事前学習が必要なこと、(3)オフラインでのバッチ訓練が基本であることである。
+この制約は、エッジデバイス・ブラウザ・組み込み環境での直接適用を難しくする。
+
+\subsection{エッジAI市場の急成長とオンデバイス学習の空白}
+
+一方で、産業界におけるエッジAIの需要は急増している。
+エッジコンピューティング市場は2025年の$214$億ドルから2026年に$285$億ドルへ成長し、CAGR $28\%$で推移している\cite{edgecomputing2026market}。
+2026年にはエッジAIがエンタープライズデータ処理の大きな割合を担うと予測されている\cite{resolvetech2026edgeai}。
+
+ZEDEDAの2026年予測では、「2026年後半には、AIの真の競争戦場は推論をどこで実行するかに移る」
+と述べられている\cite{zededa2026edge}。
+また、MDPIの調査では、オンデバイス学習は有望だが、
+「バックプロパゲーションに必要なメモリおよび計算要件が高いため、
+現在のソリューションは単純なファインチューニングに限定されることが多く、
+商業規模での実現可能性は中期の課題である」と指摘されている\cite{mdpi2025edgeaipractice}。
+
+すなわち、\textbf{「エッジで学習し、エッジで予測する軽量世界モデル」}は、
+市場需要と技術供給の間に明確な空白として存在している。
+
+\subsection{Rust/WASMのエッジAI基盤としての台頭}
+
+Rustは2025年以降、AIインフラにおける位置づけを急速に固めている。
+Hugging FaceのtokenizersライブラリはRustで構築され、
+Python実装と比較してトークン化で$10$--$43\times$の高速化を達成している\cite{groundy2026rustpython}。
+Candle（Hugging Face）やBurnはRustネイティブのMLフレームワークであり、
+サーバレス・エッジ環境向けに設計されている。
+RustのPython拡張としての利用は前年比$22\%$で成長している\cite{rusttrends2025}。
+
+特にWebAssembly（WASM）との親和性が高く、
+RustからWASMへのコンパイルは第一級のサポートを享受している。
+ブラウザやサンドボックス環境でのAI推論が可能であり、
+Candleは既にブラウザ上でモデルを直接実行している\cite{rusttrends2025}。
+
+コミュニティでは「\textbf{Python for prototyping, Rust for production}」というマントラが定着しつつある\cite{visiononedge2025rust}。
+ssm-latent-rsは、この流れの中で、世界モデルの軽量実装をRust/WASMで提供する点で
+時宜を得た取り組みである。
+
+%=============================================================
+\section{ssm-latent-rsの技術分析}
+%=============================================================
+
+\subsection{概要}
+
+\texttt{ssm-latent-rs}は、Mamba系SSMとJEPAを統合した潜在状態予測器をRustで実装したものである。
+Burnフレームワーク\cite{burn}を基盤とし、WGPU（GPU）、NdArray（CPU）、WebAssemblyの
+複数バックエンドに対応する。
+構成モジュールは以下の通りである。
+
+\begin{itemize}
+  \item \texttt{ssm.rs}: Mamba系SSMブロック（並列スキャン＋逐次ステップ）
+  \item \texttt{latent.rs}: JEPA系潜在予測器＋安定性正則化
+  \item \texttt{multimodal.rs}: 画像+センサ+アクションのマルチモーダル拡張
+  \item \texttt{main.rs}: ネイティブデモ（観測→学習→想像）
+  \item \texttt{wasm-demo/}: ブラウザ上リアルタイム学習デモ
+\end{itemize}
+
+\subsection{SSMブロックの設計}
+
+\subsubsection{参照アーキテクチャ}
+
+実装はMamba-3\cite{mamba3_2026}の設計原則に着想を得ている。
+Mamba-3は、Mamba\cite{gu2023mamba}以降のSSM系モデルの発展として、
+SSM離散化に基づくより表現力の高い再帰、複素値状態更新、
+MIMO（Multiple-Input Multiple-Output）形式を導入している。
+本実装はこれらを忠実に再現するものではなく、複素回転状態、MIMO的な低ランク入出力、
+入力依存ゲーティングを小型モデル向けに簡略化して取り入れている。
+
+\subsubsection{複素回転状態空間}
+
+SSMブロックの状態遷移は、複素回転によって実現される。
+状態行列$\mathbf{A}$を減衰成分$a_{\mathrm{re}}$と回転成分$a_{\mathrm{im}}$に分離し、
+離散化後の遷移は以下で表される。
+
+\begin{equation}
+\bar{\mathbf{A}} = \exp(\Delta t \cdot a_{\mathrm{re}}) \cdot
+\mathrm{Rot}\!\left(\Delta t \cdot a_{\mathrm{im}} + \theta\right)
+\label{eq:complex_rotation}
+\end{equation}
+
+ここで、$\theta$は入力依存の位相回転\texttt{theta\_proj}の出力であり、
+$\Delta t$は入力依存の離散化ステップ\texttt{dt\_proj}、
+$\lambda$はEvoGate的な制御パラメータ\texttt{lambda\_proj}の出力である。
+
+この設計により、状態空間は\textbf{回転しながら減衰}する軌道を描き、
+周期信号の表現に自然に適合する。
+メトロノームデモでの高速学習は、この性質に大きく依存している。
+
+\subsubsection{MIMOランク分解}
+
+入力投射$B$と出力投射$C$は、MIMOランク$r$による低ランク分解を受ける。
+
+\begin{align}
+\mathbf{B} &\in \mathbb{R}^{N_h \times r \times N_s} \\
+\mathbf{C} &\in \mathbb{R}^{N_h \times r \times N_s}
+\end{align}
+
+ここで$N_h$はヘッド数、$N_s$は状態次元である。
+これにより、各ヘッド内の$d_{\mathrm{head}}$次元を$r$個のサブ空間に分割し、
+各サブ空間が独立した入出力重みを持つ。
+$r=1$の場合は標準Mambaと等価であるが、$r>1$では
+各サブ空間が異なる時間スケールを捉える可能性が生じる。
+
+\subsubsection{並列プレフィクススキャン}
+
+訓練時の\texttt{forward()}は、対数段数の並列プレフィクススキャンを実行する。
+2$\times$2複素行列の結合則を利用し、
+理想的な並列実行ではスキャン深さがO($\log T$)となる。
+ただし、総演算量や実時間はバックエンドのテンソル実装とハードウェアに依存する。
+
+推論時の\texttt{forward\_step()}は、1ステップずつの逐次更新を行い、
+$\texttt{prev\_h}$、$\texttt{prev\_bx}$、$\texttt{conv\_state}$を明示的に管理する。
+両者の等価性は、\texttt{tests/equivalence\_test.rs}において
+\texttt{y\_parallel} $\approx$ \texttt{y\_sequential}として検証されている。
+
+\subsubsection{1ステップ更新式}
+
+逐次推論の1ステップ更新は以下で表される。
+
+\begin{equation}
+\mathbf{h}_{t+1} = \bar{\mathbf{A}} \cdot \mathrm{Rot}(\mathbf{h}_t, \alpha_t)
+  + \gamma_t \cdot \mathbf{b}_t
+  + \beta_t \cdot \mathbf{b}_{t-1}
+\label{eq:step_update}
+\end{equation}
+
+ここで、
+\begin{align}
+\gamma_t &= \Delta t \cdot \lambda_t \\
+\beta_t &= \Delta t \cdot (1 - \lambda_t) \cdot \bar{\mathbf{A}}
+\end{align}
+
+$\gamma_t$は現在の入力重み、$\beta_t$は前ステップ残差重みである。
+標準Mambaに「前ステップ残差」を加えた拡張であり、
+時系列の慣性効果を表現する能力を持つ。
+
+\subsection{JEPA系潜在予測器}
+
+\subsubsection{参照アーキテクチャ}
+
+潜在予測器はLeWorldModel\cite{leworldmodel_2026}の
+「潜在予測＋ガウス分布正則化」という考え方に着想を得ている。
+LeWorldModel自体は2項ロスでピクセルからのエンドツーエンドJEPAを安定化する手法だが、
+本実装では再構成ロスを追加した3項ロスを用いる。
+
+\subsubsection{アーキテクチャ}
+
+アーキテクチャの全体像を図\ref{fig:latent_architecture}に示す。
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+    node distance=1.0cm and 1.2cm,
+    block/.style={rectangle, draw=ssmblue!80, fill=ssmblue!8, rounded corners, minimum width=1.8cm, minimum height=0.8cm, align=center, font=\small\bfseries},
+    smallblock/.style={rectangle, draw=ssmorange!80, fill=ssmorange!8, rounded corners, minimum width=1.5cm, minimum height=0.6cm, align=center, font=\footnotesize},
+    lossblock/.style={rectangle, draw=ssmgreen!80, fill=ssmgreen!8, rounded corners, minimum width=1.8cm, minimum height=0.6cm, align=center, font=\footnotesize},
+    arrow/.style={->, >=Stealth, thick, font=\scriptsize, color=black!70}
+  ]
+    % Inputs
+    \node[block] (obs) {観測 $x_t$};
+    \node[block] (act) [below=0.8cm of obs] {アクション $a_t$};
+
+    % Encoders
+    \node[smallblock] (enc) [right=1.0cm of obs] {Encoder};
+    \node[smallblock] (aenc) [below=0.8cm of enc] {ActEncoder};
+
+    % Fusion
+    \node[smallblock] (fuse) at ($(enc.east)!0.5!(aenc.east) + (1.5, 0)$) {Fusion};
+
+    % SSM
+    \node[block] (ssm) [right=0.8cm of fuse] {SSM Block};
+
+    % Outputs
+    \node[smallblock] (pred) [above right=0.2cm and 0.8cm of ssm] {$\hat{z}_{t+1}$};
+    \node[smallblock] (dec) [below right=0.2cm and 0.8cm of ssm] {Decoder};
+    \node[smallblock] (recon) [below=0.6cm of dec] {$\hat{x}_t$};
+
+    % Losses
+    \node[lossblock] (Llatent) [right=0.6cm of pred] {$\mathcal{L}_{\mathrm{latent}}$};
+    \node[lossblock] (Lrecons) [right=0.6cm of recon] {$\mathcal{L}_{\mathrm{recons}}$};
+    \node[lossblock] (Lstability) [above=0.5cm of Llatent] {$\mathcal{L}_{\mathrm{stability}}$};
+
+    % Arrows
+    \draw[arrow] (obs) -- (enc);
+    \draw[arrow] (act) -- (aenc);
+    \draw[arrow] (enc.east) -- (fuse.west);
+    \draw[arrow] (aenc.east) -- (fuse.west);
+    \draw[arrow] (fuse) -- (ssm);
+    \draw[arrow] (ssm.east) -- (pred.west);
+    \draw[arrow] (ssm.east) -- (dec.west);
+    \draw[arrow] (dec) -- (recon);
+    \draw[arrow] (pred) -- (Llatent);
+    \draw[arrow] (recon) -- (Lrecons);
+    
+    % Stability loss path
+    \draw[arrow] (enc.north) |- (Lstability.west)
+      node[pos=0.25, right] {$z_t$ (detach)};
+
+  \end{tikzpicture}
+  \caption{LatentPredictorのアーキテクチャ}
+  \label{fig:latent_architecture}
+\end{figure}
+
+\subsubsection{3項ロス関数}
+
+損失関数は3項から構成される。
+
+\begin{enumerate}
+  \item \textbf{潜在予測ロス}:
+    \begin{equation}
+    \mathcal{L}_{\mathrm{latent}} = \mathrm{MSE}\!\left(z_{t+1:T},\;\hat{z}_{1:T-1}\right)
+    \end{equation}
+    ここで$z_{t+1:T}$は\texttt{detach}（勾配停止）されたターゲットである。
+    これがJEPAの中核：観測の潜在表現を入力とし、次時刻の潜在表現を予測する。
+
+  \item \textbf{再構成ロス}:
+    \begin{equation}
+    \mathcal{L}_{\mathrm{recons}} = \mathrm{MSE}\!\left(x_t,\;\hat{x}_t\right)
+    \end{equation}
+    Encoderを通じた再構成であり、表現が観測の情報を保持することを補助する。
+
+  \item \textbf{安定性正則化}:
+    \begin{equation}
+    \mathcal{L}_{\mathrm{stability}} = \underbrace{
+      \frac{1}{K}\sum_{k=1}^{K} \bar{\mu}_k^2
+    }_{\text{平均ペナルティ}}
+    + \underbrace{
+      \frac{1}{K}\sum_{k=1}^{K} \left(\bar{\sigma}_k^2 - 1\right)^2
+    }_{\text{分散ペナルティ}}
+    \label{eq:stability_loss}
+    \end{equation}
+    ここで$\bar{\mu}_k, \bar{\sigma}_k^2$は、固定ガウス射影行列
+    $\mathbf{W} \in \mathbb{R}^{d \times K}$による射影後の統計量である。
+    \begin{align}
+    \mathbf{p} &= z \cdot \mathbf{W} \\
+    \bar{\mu}_k &= \mathrm{mean}(p_k),\quad
+    \bar{\sigma}_k^2 = \mathrm{var}(p_k)
+    \end{align}
+\end{enumerate}
+
+安定性正則化は、\textbf{ネガティブサンプルやコントラスト対を用いずに}表現崩壊を防止する。
+これはVICReg\cite{bardes2022vicreg}やBarlow Twins\cite{zbontar2021barlow}の
+アプローチをJEPAに統合したものと言える。
+計算量はO(T)であり、バッチ内の全時刻に対して1回の射影と統計計算で済む。
+
+\subsubsection{オンライン推論ステップ}
+
+\texttt{step()}関数は、1時刻の観測とアクションから次の潜在状態を計算し、
+内部状態を更新する。
+
+\begin{equation}
+z_{t+1},\;S_{t+1} = \mathrm{step}(z_t,\;a_t,\;S_t)
+\end{equation}
+
+ここで$S_t = (\mathbf{h}_t, \mathbf{b}_{t-1}, \mathbf{c}_t)$は
+SSMの内部状態（潜在状態・前ステップ入力・畳み込み状態）である。
+この1ステップAPIは、ストリーミングデータに対するリアルタイム推論を可能にする。
+
+\subsection{マルチモーダル拡張}
+
+\texttt{multimodal.rs}は、画像、センサ値、アクションの3モダリティを統合する拡張である。
+
+\begin{itemize}
+  \item 画像入力 $[B, T, C, H, W]$: Conv2D $\times$ 2 + Linear $\to z_{\mathrm{vis}} \in \mathbb{R}^{d}$
+  \item センサ入力 $[B, T, S]$: Linear $\to z_{\mathrm{sens}} \in \mathbb{R}^{d}$
+  \item アクション入力 $[B, T, A]$: Linear $\to z_{\mathrm{act}} \in \mathbb{R}^{d}$
+\end{itemize}
+
+3つの埋め込みを連結し、Fusion層で統合した後にSSMに入力する。
+SSMの出力から画像デコーダとセンサデコーダに分岐する。
+これは、NVIDIA Cosmosの「画像+センサ+アクション」統合や、
+WayveのGAIA-2のマルチカメラ統合と同等の設計思想であるが、
+はるかに軽量な実装となっている。
+
+\subsection{WASMメトロノームデモ}
+
+\subsubsection{概要}
+
+ブラウザ上で動作するメトロノーム学習デモを実装している。
+図\ref{fig:wasm_demo}にデモ画面を示す。
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.7\textwidth]{wasm_demo.png}
+  \caption{WASMメトロノームデモ。青線が現実（物理エンジン）、オレンジ線が想像（Mamba-JEPA世界モデル）。ブラウザ上でリアルタイムに学習・予測を行う。}
+  \label{fig:wasm_demo}
+\end{figure}
+
+\subsubsection{動作原理}
+
+\begin{enumerate}
+  \item 物理エンジンがメトロノームの振り子運動$\theta(t) = 1.2\sin(t)$を生成
+  \item 観測$[0, 0, \theta, \cos(t)]$を128ステップ分バッファ
+  \item 10フレームごとにオンライン学習（勾配計算＋Adam更新）
+  \item SSMの\texttt{step()}で1ステップ先を予測
+  \item 予測と現実を0.5--2\%の比率でミックス（推測の自律性を確保）
+\end{enumerate}
+
+約100エポックで「想像線」が「現実線」と同期する。
+CPU（NdArray バックエンド）でもリアルタイム動作を確認している。
+
+\subsubsection{ネイティブデモとの対比}
+
+ネイティブデモ（\texttt{main.rs}）は3部構成である。
+
+\begin{enumerate}
+  \item \textbf{観測}: 円運動のノイズ付き観測を表示
+  \item \textbf{夢見（訓練）}: 120エポックの学習中、30エポックごとに
+    「精神的シミュレーション」とGround Truthの並行表示
+  \item \textbf{純粋想像}: 観測を遮断し、内部世界モデルのみで未来を予測
+\end{enumerate}
+
+図\ref{fig:world_model_demo}にネイティブデモの画面を示す。
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.7\textwidth]{world_model.png}
+  \caption{ネイティブデモ。左がGround Truth、右がMental Map（予測）。訓練の進行に伴い、予測が現実に近づいていく。}
+  \label{fig:world_model_demo}
+\end{figure}
+
+\subsection{ベンチマーク結果}
+
+\texttt{BENCHMARK.md}に記載の性能比較を表\ref{tab:benchmark}に示す。
+
+\begin{table}[htbp]
+  \centering
+  \caption{バックエンド別の訓練ステップ性能比較}
+  \label{tab:benchmark}
+  \begin{tabular}{lccc}
+    \toprule
+    バックエンド & 5エポック合計 & 1エポック平均 & 倍率 \\
+    \midrule
+    NdArray (CPU) & 7.973 s & 1.595 s & 1.00$\times$ \\
+    WGPU (GPU) & 0.346 s & 0.069 s & 23.12$\times$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+モデル設定: $d_{\mathrm{model}}=128$, $d_{\mathrm{state}}=32$, expand$=2$,
+batch\_size$=16$, seq\_len$=64$。
+GPUにより$23\times$の高速化が得られるが、CPUでも小規模設定・低頻度更新であればオンライン学習が可能であることを示唆している。
+一方、リアルタイム性は系列長、バッチサイズ、更新頻度、バックエンドに依存する。
+
+%=============================================================
+\section{大規模世界モデルとの技術比較}
+%=============================================================
+
+\subsection{アーキテクチャ比較}
+
+表\ref{tab:architecture_comparison}に、ssm-latent-rsと主要世界モデルの
+アーキテクチャ比較を示す。
+
+{\footnotesize
+\setlength{\tabcolsep}{2pt}
+\begin{longtable}{p{22mm}p{25mm}p{18mm}p{20mm}p{24mm}p{24mm}}
+\toprule
+ & ssm-latent-rs & Genie 3 & Cosmos & V-JEPA 2 & GWM-1 \\
+\midrule
+\endhead
+バックボーン & SSM (Mamba系) & 動画生成系 & 拡散/生成系 & JEPA & 生成系 \\
+状態空間 & 複素回転SSM & なし & なし & なし & なし \\
+アクション条件付き & ~$\checkmark$~実装済 & ~$\checkmark$ & ~$\checkmark$ & 事後適応 & ~$\checkmark$ \\
+オンライン学習 & ~$\checkmark$~小規模デモで実証 & なし & なし & なし & なし \\
+デバイス & CPU/WASM & 大規模GPU前提 & 大規模GPU前提 & GPU前提 & 大規模GPU前提 \\
+隠れ次元/規模 & $d_{model}=32$--128の小型設定 & 大規模 & 大規模 & 大規模 & 大規模 \\
+モデルサイズ & 数MB & GB級 & GB級 & GB級 & GB級 \\
+事前データ & デモでは不要 & 大規模動画 & 大規模動画 & 100万時間以上 & 大規模動画 \\
+ライセンス & MIT & プロプライエタリ & オープン重み & 不明 & プロプライエタリ \\
+\bottomrule
+\caption{ssm-latent-rsと主要世界モデルのアーキテクチャ比較}
+\label{tab:architecture_comparison}
+\end{longtable}
+}
+
+\subsection{実質的な差別化要因}
+
+ssm-latent-rsの差別化要因は以下の4点に集約される。
+
+\begin{enumerate}
+  \item \textbf{ゼロコールドスタート}: 事前学習データなしでも短時間の観測から学習を開始可能。
+  \item \textbf{オンライン学習}: ストリーミングデータに対してリアルタイムに勾配更新。
+  \item \textbf{CPU/WASM動作}: GPUなしで動作。ブラウザ上で完結。
+  \item \textbf{クロスプラットフォーム}: Burnのバックエンド抽象化により、同一コードがGPU/CPU/WASMで動作。
+\end{enumerate}
+
+大規模世界モデルは「インターネット動画から物理を学習する」パラダイムであるのに対し、
+ssm-latent-rsは「観測ストリームからその場で物理を推定する」パラダイムである。
+前者が必要な場面（汎用ロボット、ゲーム生成）と後者が必要な場面（特定設備の監視、個体適応）は
+本質的に異なる。
+
+%=============================================================
+\section{産業適用の有効性}
+%=============================================================
+
+\subsection{ケース1: エッジ予知保全 --- ゼロコールドスタートの異常検知}
+
+\subsubsection{課題}
+
+産業用予知保全では、以下が実務上の重要課題である。
+
+\begin{enumerate}
+  \item 新設備・新プロセスで過去データがなく、数ヶ月の学習期間が必要
+  \item 遠洋船舶・山間プラント・地下設備で通信途絶
+  \item クラウド往復のレイテンシ（数百ms〜秒）が検知→遮断に間に合わない
+  \item 工場の生産データをクラウドに出せない（セキュリティ・法的制約）
+  \item 何千台ものセンサーからのクラウド送信コストが月額数千万
+\end{enumerate}
+
+既存のクラウドML予知保全は、データ蓄積→バッチ訓練→デプロイのサイクルが必要であり、
+新規設備には適用できない。
+Deloitteは、2026年までに製造業におけるエージェンティックAI導入が4倍に増加すると予測している\cite{oxmaint2026smartfactory}。
+
+\subsubsection{ssm-latent-rsによる解決アプローチ}
+
+\begin{enumerate}
+  \item \textbf{オンライン学習}: センサー接続直後から学習開始。~100エポック（デモでは数秒）で予測同期。
+  \item \textbf{完全ローカル推論}: WASM/CPUで動作。適切な実装構成では観測データを外部送信せずに処理できる。
+  \item \textbf{安定性正則化による異常検知}: 正常データだけで表現空間を構築し、
+    そこから外れるものを異常と判定（$z$の射影統計量がN(0,1)から逸脱する度合い）。
+  \item \textbf{1ステップAPI}: \texttt{step()}により、各センサーフレームを
+    逐次処理してアラートを生成。
+\end{enumerate}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+    node distance=0.8cm and 1.2cm,
+    block/.style={rectangle, draw=ssmblue!80, fill=ssmblue!8, rounded corners, minimum width=2.2cm, minimum height=0.8cm, align=center, font=\small},
+    alert/.style={rectangle, draw=ssmred!80, fill=ssmred!8, rounded corners, minimum width=2.0cm, minimum height=0.7cm, align=center, font=\small},
+    arrow/.style={->, >=Stealth, thick, font=\scriptsize, color=black!70}
+  ]
+    \node[block] (sensor) {センサー\\ストリーム};
+    \node[block] (model) [right=1.2cm of sensor] {世界モデル\\（オンライン学習）};
+    \node[block] (pred) [right=1.2cm of model] {予測\\$\hat{x}_{t+1}, \hat{z}_{t+1}$};
+    \node[block] (stability) [above=0.7cm of pred] {安定性評価\\$\bar{\mu}_k, \bar{\sigma}_k^2$};
+    \node[alert] (alert) [right=1.2cm of stability] {異常アラート};
+
+    \draw[arrow] (sensor) -- (model);
+    \draw[arrow] (model) -- (pred);
+    \draw[arrow] (pred) -- (stability);
+    \draw[arrow] (stability) -- (alert);
+    \draw[arrow, dashed] (model.north) |- (stability.west) node[pos=0.7, above] {$z_t$};
+  \end{tikzpicture}
+  \caption{エッジ予知保全におけるssm-latent-rsの適用構成}
+  \label{fig:edge_predictive_maintenance}
+\end{figure}
+
+\subsubsection{有効性の根拠}
+
+OxMaintの調査では、AI予知保全により70\%の故障削減、25\%の保守コスト削減、20\%のアップタイム向上が報告されている\cite{oxmaint2026smartfactory}。
+また、エッジAIによりサブミリ秒の応答・100\%オフライン動作・30--50\%のクラウドコスト削減が可能である\cite{lastingdynamics2026pdm}。
+これらの効果は、推論と学習がデバイス上で完結する場合に最大化される。
+これは、ssm-latent-rsが提供する中核的な能力である。
+
+MDPIの2025年の調査では、軽量シグナル処理とエッジAIを組み合わせた異常検知が
+F1スコア0.94を達成し、量子化TinyMLモデルでは3$\times$のメモリ削減と60\%の消費電力削減を達成している\cite{mdpi2025edgeanomaly}。
+ssm-latent-rsは同じ領域に対して、ルールベースではなく学習ベースの異常検知を提供する。
+
+\subsection{ケース2: ロボット制御 --- 個体適応型世界モデル}
+
+\subsubsection{課題}
+
+産業用・サービスロボット（製造・物流・介護）の運用では以下が問題となる。
+
+\begin{enumerate}
+  \item 同型ロボットでも関節の経年変化・摩擦が違い、一律のポリシーが通じない
+  \item 環境変化（照明・荷重・床面）に対して固定ポリシーが脆弱
+  \item 新タスクごとにクラウドで再トレーニング→デプロイのサイクルが重い
+\end{enumerate}
+
+Physical Intelligenceは$6$億ドルを調達し、ロボット基盤モデルに注力している\cite{notboring2026worldmodels}。
+ShengShuのMotubrainは、1つの統合モデルで多タスク・多ロボットを実現している\cite{motubrain}。
+しかし、これらは全てGPUを前提とする大規模モデルであり、小型ロボットへのオンデバイス展開には重すぎる。
+
+\subsubsection{ssm-latent-rsによる解決アプローチ}
+
+\begin{enumerate}
+  \item \textbf{アクション条件付き予測}: \texttt{step(z, action, state)}により、
+    「行動の結果どうなるか」を推論可能。これはDreamer\cite{hafner2023dreamerv3}の
+    「想像による計画」と同じパラダイムであるが、エッジで動作する。
+  \item \textbf{個体適応}: 各ロボットが自身のセンサーデータから独自の世界モデルを構築。
+    「関節Aの摩擦が増えた」といった個体差をオンラインで反映。
+  \item \textbf{モデルベース計画}: 複数候補アクションを\texttt{step()}で評価し、
+    最適な行動を選択（MPC的な利用）。
+\end{enumerate}
+
+\subsubsection{有効性の根拠}
+
+DreamerV3のNature論文は、世界モデルを学習したエージェントが
+「想像」によって行動を改善できることを実証している\cite{hafner2023dreamerv3}。
+また、NVIDIA Cosmos Policyは世界基盤モデルをロボット制御に適応し、
+LIBEROベンチマークで98.5\%の成功率を達成している\cite{nvidiacosmospolicy}。
+ただし、CosmosはGPU前提であり、エッジロボットへの適用には別の軽量実装が必要である。
+RWM-U（Uncertainty-Aware Robotic World Model）は、
+オフラインMBRLを実際の四脚・ヒューマノイドロボットで機能させる手法を提案しているが\cite{rwmu2025}、
+PyTorch実装であり、デプロイには別フレームワークへの移植が必要である。
+
+\subsection{ケース3: デジタルツイン軽量化 --- ミニ予測エンジン}
+
+\subsubsection{課題}
+
+デジタルツインは、NVIDIA Omniverse等の強力なプラットフォームが存在するが、
+初期導入コストが数億円規模であり、「小さな設備1台をツインしたい」という需要には重すぎる。
+また、物理パラメータの手設定に専門家が必要である。
+
+OxMaintのデータでは、大規模施設でのデジタルツイン導入により
+年間$120$万--$350$万ドルの節約が報告されているが\cite{oxmaint2026smartfactory}、
+これは初期投資$20$万--$60$万ドルを前提とする。
+
+\subsubsection{ssm-latent-rsによる解決アプローチ}
+
+「学習型ミニツイン」--- データから動特性を推定する軽量世界モデルというPoC仮説：
+
+\begin{enumerate}
+  \item 短時間の観測データ$\to$オンライン学習$\to$以降は予測エンジンとして動作
+  \item 物理パラメータの手設定不要: SSMが自然にダイナミクスを学習
+  \item 数MBのモデル: ブラウザで可視化ダッシュボードに予測線を追加可能
+\end{enumerate}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{tikzpicture}[
+    node distance=0.8cm and 1.2cm,
+    phase/.style={rectangle, draw=ssmpurple!80, fill=ssmpurple!8, rounded corners, minimum width=2.0cm, minimum height=0.8cm, align=center, font=\small},
+    arrow/.style={->, >=Stealth, thick, font=\scriptsize, color=black!70}
+  ]
+    \node[phase] (obs) {短時間の\\観測データ};
+    \node[phase] (learn) [right=1.0cm of obs] {オンライン\\学習};
+    \node[phase] (predict) [right=1.0cm of learn] {予測\\エンジン};
+    \node[phase] (dashboard) [right=1.0cm of predict] {ダッシュ\\ボード};
+
+    \draw[arrow] (obs) -- (learn) node[midway, above] {接続};
+    \draw[arrow] (learn) -- (predict) node[midway, above] {$\sim$100 ep};
+    \draw[arrow] (predict) -- (dashboard) node[midway, above] {予測線};
+  \end{tikzpicture}
+  \caption{ミニ予測エンジンの導入フロー}
+  \label{fig:mini_twin}
+\end{figure}
+
+\subsubsection{有効性の根拠}
+
+AlphaBoldの調査では、ジェネレーティブAIによる合成データ生成が
+予知保全において「まだ発生していないイベント」の訓練を可能にすることが示されている\cite{alphabold2026pdm}。
+ssm-latent-rsは、ジェネレーティブAIの全機能ではなく、
+予測生成に特化することで、デプロイサイズと計算要件を大幅に削減する。
+
+\subsection{ケース4: オンデバイスプライバシーAI --- 個人データを外部送信しない構成}
+
+\subsubsection{課題}
+
+ヘルスケア、金融、生体認証などではセンサーデータのクラウド送信が
+GDPR、APPI等の規制により困難である。
+「データは出したくないが、AIの恩恵は受けたい」という需要が広く存在する。
+
+\subsubsection{ssm-latent-rsによる解決アプローチ}
+
+\begin{enumerate}
+  \item ローカル推論・学習: 現行デモではWASMでブラウザ内に処理を閉じる構成が可能
+  \item 軽量モデル: スマホやウェアラブル上で動作可能なサイズ
+  \item オンライン適応: 個人ごとのデータでその場で微調整
+\end{enumerate}
+
+\subsubsection{有効性の根拠}
+
+STマイクロエレクトロニクスのEmbedded World 2026発表では、
+STM32N6のNeural-ARTアクセラレータが600 GOPSのオンチップ推論を実現し、
+「かつてはマイクロプロセッサを必要としたワークロードがMCUで動作する」
+ことが実証されている\cite{st2026ew}。
+ssm-latent-rsのCPU動作能力は、この傾向と整合的である。
+
+%=============================================================
+\section{競合比較と差別性}
+%=============================================================
+
+\subsection{代替手法との比較}
+
+表\ref{tab:competitor_comparison}に、ssm-latent-rsと代替手法の比較を示す。
+
+{\footnotesize
+\setlength{\tabcolsep}{2pt}
+\begin{longtable}{p{27mm}p{28mm}p{31mm}p{29mm}p{29mm}}
+\toprule
+ & ssm-latent-rs & PyTorch系\\世界モデル & ルールベース\\異常検知 & クラウドML\\予測 \\
+\midrule
+\endhead
+エッジ動作 & ~$\checkmark$~WASM/CPU & ~$\triangle$~多くはGPU前提 & ~$\checkmark$~軽量 & ~$\times$~クラウド \\
+オンライン学習 & ~$\checkmark$~リアルタイム & ~$\times$~バッチ再訓 & ~$\triangle$~閾値調整のみ & ~$\times$~バッチ \\
+事前データ不要 & ~$\checkmark$~ゼロスタート & ~$\times$~大量データ & ~$\triangle$~閾値設定必要 & ~$\times$~大量データ \\
+アクション条件付き & ~$\checkmark$~実装済 & ~$\checkmark$~ツールあるが重い & ~$\times$~不可能 & ~$\triangle$~限定的 \\
+マルチモーダル & ~$\checkmark$~スキャフォールド & ~$\checkmark$~ツールあるが重い & ~$\times$~困難 & ~$\triangle$~可能だが重い \\
+デプロイサイズ & 小（数MB） & 大（GB級） & 極小 & N/A \\
+データ主権 & ~$\checkmark$~完全ローカル & ~$\triangle$~モデル次第 & ~$\checkmark$~ローカル & ~$\times$~クラウド \\
+\bottomrule
+\caption{ssm-latent-rsと代替手法の比較}
+\label{tab:competitor_comparison}
+\end{longtable}
+}
+
+\subsection{差別性の持続性}
+
+ssm-latent-rsの差別性は「大規模世界モデルではカバーしにくい需要領域」に位置づけられる。
+NVIDIA CosmosやGenie 3は汎用物理シミュレーションに向くが、
+「特定の1台の設備について、短時間の観測から学習し、その場で予測を開始する」という
+ニーズには、パラメータ数の観点から不適である。
+この差別性は、大規模モデルの軽量化が進んでも、
+「ゼロデータスタート＋オンライン学習」という性質により維持されると考えられる。
+
+ただし、SSMの軽量性を活かしたPyTorch実装が現れる可能性はある。
+Rust/WASMデプロイの優位性（単一バイナリ、セキュリティ、起動速度）は、
+Pythonエコシステムでは複製困難であり、長期的な差別要因である。
+
+%=============================================================
+\section{技術的リスクと限界}
+%=============================================================
+
+\subsection{表現力の限界}
+
+現在実証されているのは、メトロノーム（単一周波数sin波）と
+円運動（cos+sin）の学習である。
+より複雑な力学系（多関節ロボット、流体シミュレーション、
+確率的遷移）へのスケーリングは未検証である。
+
+SSMの表現力は状態次元$d_{\mathrm{state}}$に依存する。
+現在の設定（$d_{\mathrm{state}}=8$--$32$）は周期信号には十分だが、
+高次元な状態空間を持つ系では増加が必要となり、
+計算・メモリコストが増大する可能性がある。
+
+\subsection{長期安定性}
+
+Genie 3は数分程度のセッション安定性を持つと報告されているが\cite{deepmind2025genie3}、
+ssm-latent-rsのドリームロールアウト（観測ゼロでの長期予測）の
+安定性は未系統的に測定されていない。
+WASMデモでは0.5--2\%の現実同期により安定化しているが、
+純粋な想像モードでの有効ホライズンは不明である。
+
+\subsection{アクションラベルデータの不足}
+
+大規模世界モデルの議論で指摘される「ビデオは豊富だが、
+奥行きがなく、アクションラベルがない」という問題\cite{notboring2026worldmodels}は、
+ssm-latent-rsにも該当する。
+\texttt{step()}はアクション入力を取る設計だが、
+アクションラベルの品質が予測精度に直結する。
+
+\subsection{因果性と相関}
+
+インターネットスケールの動画データから学習する世界モデルは、
+相関を学習するが真の因果を学習しないという指摘がある\cite{graison2026worldmodels}。
+ssm-latent-rsも同様に、観測から相関的ダイナミクスを学習するに過ぎない。
+構造的介入の効果を予測する用途（例：バルブを開けたらどうなるか）では、
+因果的推論が不足する可能性がある。
+
+\subsection{SSMのアーキテクチャ的制約}
+
+SSMは本質的に因果的（左から右へ）である。
+双方向コンテキストが必要なタスク（例：履歴全体を考慮した診断）には、
+二つのSSMを前後方向で併走させる必要がある。
+また、SSMは位置符号化を明示的に持たないため、
+位置に依存する推論には限界がある。
+
+%=============================================================
+\section{導入ロードマップ}
+%=============================================================
+
+\subsection{フェーズ1: 単一センサー異常検知（1--3ヶ月）}
+
+\begin{itemize}
+  \item 対象: 振動・温度・電流等の単一センサーデータ
+  \item 手法: 安定性正則化スコアによる異常判定
+  \item デモ: メトロノームデモを産業センサー波形に置換
+  \item 検証: 公開データセット（NASC、CWRU等）での精度評価
+  \item デプロイ: WASM + ダッシュボード（Grafana プラグイン等）
+\end{itemize}
+
+\subsection{フェーズ2: マルチセンサー予知保全（3--6ヶ月）}
+
+\begin{itemize}
+  \item 対象: 複数センサーデータの統合監視
+  \item 手法: \texttt{MultimodalLatentPredictor}の検証
+  \item 拡張: 画像入力（熱画像・顕微鏡等）の統合
+  \item 検証: 実設備でのオンライン学習→予測のパイロット
+  \item デプロイ: エッジデバイス（Raspberry Pi / Jetson）向けバイナリ
+\end{itemize}
+
+\subsection{フェーズ3: アクション条件付き予測（6--12ヶ月）}
+
+\begin{itemize}
+  \item 対象: 設備制御アクションの結果予測
+  \item 手法: \texttt{step()}を用いたMPC的なアクション評価
+  \item 拡張: 制御システム（PLC / SCADA）との連携API
+  \item 検証: 「バルブを開けたらどうなるか」の予測精度評価
+  \item デプロイ: 制御システムへの組込み（C FFI / WASM）
+\end{itemize}
+
+\subsection{フェーズ4: ロボット適応制御（12ヶ月以降）}
+
+\begin{itemize}
+  \item 対象: 協働ロボット・AMRの個体適応
+  \item 手法: 各ロボット上でオンライン学習する世界モデル
+  \item 拡張: ROS2ノードとしての統合
+  \item 検証: 物理ロボットでの適応能力評価
+  \item デプロイ: ロボット制御SDK
+\end{itemize}
+
+%=============================================================
+\section{評価指標}
+%=============================================================
+
+ssm-latent-rsの産業適用を評価するための指標を表\ref{tab:metrics}に整理する。
+
+\begin{longtable}{p{30mm}p{105mm}}
+\toprule
+評価観点 & 指標例 \\
+\midrule
+\endhead
+学習速度 & ゼロスタートから予測同期に要するエポック数・時間 \\
+予測精度 & MSE（1, 10, 100ステップ先）、ホライズン別精度 \\
+異常検知性能 & Precision, Recall, F1, ROC-AUC, PR-AUC \\
+ドリーム安定性 & 観測遮断後の予測誤差の時間発展 \\
+適応速度 & 環境変化後の再同期に要するエポック数 \\
+デプロイサイズ & バイナリサイズ、WASMモジュールサイズ \\
+推論レイテンシ & 1ステップ推論の所要時間（デバイス別） \\
+メモリ使用量 & 訓練時・推論時のピークメモリ \\
+エッジ効率 & 単位電力あたりの推論スループット \\
+データ主権 & クラウド送信バイト数（理想は0） \\
+\bottomrule
+\caption{評価指標の体系}
+\label{tab:metrics}
+\end{longtable}
+
+%=============================================================
+\section{結論}
+%=============================================================
+
+本レポートでは、SSM+JEPA統合アーキテクチャに基づく
+軽量世界モデルssm-latent-rsの技術分析と産業適用可能性を検討した。
+
+2024--2026年にかけて世界モデルはAI研究の最前線として急速に発展し、
+Genie 3、Cosmos、V-JEPA 2、GWM-1などの大規模システムが相次いでリリースされた。
+しかし、これらはGPUクラスタと大量事前データを前提とし、
+エッジデバイス・ブラウザ・組み込み環境での直接適用を難しくしている。
+一方で、産業界ではエッジAI市場がCAGR 28\%で成長し、
+「デバイス上で学習し、デバイス上で予測する」軽量学習モデルへの需要が高まっている。
+
+ssm-latent-rsは、以下の4点においてこの空白を埋める位置にある。
+
+\begin{enumerate}
+  \item \textbf{ゼロコールドスタート}: 事前学習データなしでも短時間の観測から学習を開始可能。
+  \item \textbf{オンライン学習}: ストリーミングデータに対するリアルタイム勾配更新。
+  \item \textbf{CPU/WASM動作}: GPUなしで動作。ブラウザ上で完結。
+  \item \textbf{アクション条件付き}: 制御入力の結果を予測する\texttt{step()}API。
+\end{enumerate}
+
+産業適用として、以下の4領域で有効性が期待されるユースケースを整理した。
+
+\begin{enumerate}
+  \item \textbf{エッジ予知保全}: 新設備への即時適応、完全ローカル推論、安定性正則化による異常検知
+  \item \textbf{ロボット制御}: 個体適応型世界モデル、MPC的アクション評価
+  \item \textbf{デジタルツイン軽量化}: 学習型ミニ予測エンジン、既存ダッシュボードへの容易な組み込み
+  \item \textbf{オンデバイスプライバシーAI}: 完全ローカル推論・学習、データ主権の確保
+\end{enumerate}
+
+中でも\textbf{エッジ予知保全×ゼロコールドスタート}が最も即時性の高い適用領域である。
+市場が大きく（2026年エッジコンピューティング市場$285$億ドル）、既存ソリューションの空白が明確であり、
+メトロノームデモを産業センサー波形に置換したPoCを構築することで
+意思決定者に「動くもの」を示せるからである。
+
+ただし、以下の技術的限界を認識した上での段階的導入が必要である。
+
+\begin{itemize}
+  \item 複雑力学系へのスケーリングは未検証
+  \item ドリームロールアウトの長期安定性は未測定
+  \item 因果推論の不足（相関ベースの予測に留まる）
+  \item アクションラベルデータの品質依存性
+\end{itemize}
+
+実務導入においては、単一センサー異常検知から開始し、
+マルチセンサー統合、アクション条件付き予測、ロボット適応制御へと
+段階的に高度化することが望ましい。
+
+\newpage
+
+%=============================================================
+\begin{thebibliography}{99}
+%=============================================================
+
+\bibitem{ha2018world}
+D. Ha and J. Schmidhuber,
+``World Models,''
+arXiv preprint arXiv:1803.10122, 2018.
+\url{https://arxiv.org/abs/1803.10122}
+
+\bibitem{lecun2022ami}
+Y. LeCun,
+``A Path Towards Autonomous Machine Intelligence,''
+Meta AI Technical Report, 2022.
+\url{https://openreview.net/forum?id=ZB6QHFEerFj}
+
+\bibitem{mamba3_2026}
+A. Lahoti, K. Y. Li, B. Chen, C. Wang, A. Bick, J. Z. Kolter, T. Dao, and A. Gu,
+``Mamba-3: Improved Sequence Modeling using State Space Principles,''
+arXiv preprint arXiv:2603.15569, 2026.
+\url{https://arxiv.org/abs/2603.15569}
+
+\bibitem{leworldmodel_2026}
+L. Maes, Q. Le Lidec, D. Scieur, Y. LeCun, and R. Balestriero,
+``LeWorldModel: Stable End-to-End Joint-Embedding Predictive Architecture from Pixels,''
+arXiv preprint arXiv:2603.19312, 2026.
+\url{https://arxiv.org/abs/2603.19312}
+
+\bibitem{gu2023mamba}
+A. Gu and D. Dao,
+``Mamba: Linear-Time Sequence Modeling with Selective State Spaces,''
+arXiv preprint arXiv:2312.00752, 2023.
+
+\bibitem{hafner2023dreamerv3}
+D. Hafner, J. Pasukonis, J. Ba, and T. Lillicrap,
+``Mastering Diverse Domains through World Models,''
+Nature, 2025.
+\url{https://doi.org/10.1038/s41586-024-08340-3}
+
+\bibitem{burn}
+Burn -- Rust ML Framework,
+\url{https://burn.dev/}
+
+\bibitem{deepmind2025genie3}
+Google DeepMind,
+``Genie 3: A new frontier for world models,''
+August 2025.
+\url{https://deepmind.google/discover/blog/genie-3-a-new-frontier-for-world-models/}
+
+\bibitem{google2026projectgenie}
+Google,
+``Project Genie: Experimenting with infinite, interactive worlds,''
+January 2026.
+\url{https://labs.google/fx/tools/genie}
+
+\bibitem{nvidiacosmospolicy}
+NVIDIA,
+``Cosmos Policy: Adapting World Foundation Models for Robot Control and Planning,''
+The Robot Report, February 2026.
+\url{https://www.therobotreport.com/nvidia-adds-cosmos-policy-world-foundation-models/}
+
+\bibitem{vjepa2}
+M. Assran et al.,
+``V-JEPA 2: Self-Supervised Video Models Enable Understanding, Prediction and Planning,''
+arXiv preprint arXiv:2506.09985, 2025.
+\url{https://arxiv.org/abs/2506.09985}
+
+\bibitem{gwm1}
+Runway,
+``Introducing Runway GWM-1,''
+December 2025.
+\url{https://runwayml.com/research/introducing-runway-gwm-1}
+
+\bibitem{motubrain}
+ShengShu Technology,
+``World Action Model `Motubrain': One Brain, Infinite Possibilities for Robotic Intelligence,''
+Robotics Tomorrow, April 2026.
+\url{https://www.roboticstomorrow.com/news/2026/04/29/shengshu-technology-unveils-world-action-model-motubrain/}
+
+\bibitem{graison2026worldmodels}
+Graison,
+``World Models: The Next Leap Beyond LLMs,''
+April 2026.
+\url{https://medium.com/@graison/world-models-the-next-leap-beyond-llms-012504a9c1e7}
+
+\bibitem{notboring2026worldmodels}
+Not Boring,
+``World Models: Computing the Uncomputable,''
+March 2026.
+\url{https://www.notboring.co/p/world-models}
+
+\bibitem{scientificamerican2026worldmodel}
+Scientific American,
+``World models could unlock the next revolution in artificial intelligence,''
+January 2026.
+\url{https://www.scientificamerican.com/article/world-models-could-unlock-the-next-revolution-in-artificial-intelligence/}
+
+\bibitem{nature2026worldmodels}
+Nature,
+```World models' are AI's latest sensation: what are they and why do they matter?''
+April 2026.
+\url{https://www.nature.com/articles/d41586-026-00820-5}
+
+\bibitem{edgecomputing2026market}
+GM Insights,
+``Edge Computing Market Size \& Share, Growth Trends 2026--2035,''
+2025.
+\url{https://www.gminsights.com/industry-analysis/edge-computing-market}
+
+\bibitem{resolvetech2026edgeai}
+Resolve Tech Solutions,
+``Edge AI in 2026: Driving Real-Time Enterprise Transformation,''
+March 2026.
+\url{https://resolvetech.com/edge-ai-in-2026-driving-real-time-enterprise-transformation/}
+
+\bibitem{zededa2026edge}
+ZEDEDA,
+``2026 Predictions: How Edge AI is Reshaping Industrial Operations,''
+January 2026.
+\url{https://zededa.com/blog/2026-predictions-how-edge-ai-is-reshaping-industrial-operations/}
+
+\bibitem{mdpi2025edgeaipractice}
+MDPI,
+``Edge AI in Practice: A Survey and Deployment Framework for Neural Networks on Embedded Systems,''
+Electronics, Vol. 14, No. 24, 2025.
+\url{https://www.mdpi.com/2079-9292/14/24/4877}
+
+\bibitem{rusttrends2025}
+Rust Trends,
+``Rust's Enterprise Breakthrough Year,''
+2025.
+\url{https://rust-trends.com/newsletter/rust-enterprise-breakthrough-2025/}
+
+\bibitem{groundy2026rustpython}
+Groundy,
+``Rust Is Quietly Replacing Python in AI Infrastructure,''
+March 2026.
+\url{https://groundy.com/articles/rust-quietly-replacing-python-ai/}
+
+\bibitem{visiononedge2025rust}
+Vision on Edge,
+``The Rise of Rust in Agentic AI Systems,''
+October 2025.
+\url{https://visiononedge.com/rise-of-rust-in-agentic-ai-systems/}
+
+\bibitem{oxmaint2026smartfactory}
+OxMaint,
+``Future of Smart Factories: AI Predictive Maintenance Transforming Manufacturing,''
+March 2026.
+\url{https://www.oxmaint.com/blog/post/future-factory-ai-predictive-maintenance-smart-manufacturing}
+
+\bibitem{lastingdynamics2026pdm}
+Lasting Dynamics,
+``AI Predictive Maintenance 2026: Cut Downtime by 50\%,''
+February 2026.
+\url{https://www.lastingdynamics.com/blog/ai-predictive-maintenance-industrial-guide-2026/}
+
+\bibitem{mdpi2025edgeanomaly}
+MDPI Sensors,
+``Lightweight Signal Processing and Edge AI for Real-Time Anomaly Detection in IoT Sensor Networks,''
+Vol. 25, No. 21, 2025.
+\url{https://www.mdpi.com/1424-8220/25/21/6629}
+
+\bibitem{rwmu2025}
+C. Li, A. Krause, and M. Hutter,
+``Uncertainty-Aware Robotic World Model Makes Offline Model-Based Reinforcement Learning Work on Real Robots,''
+arXiv preprint arXiv:2504.16680, 2025.
+
+
+\bibitem{alphabold2026pdm}
+AlphaBold,
+``AI-Powered Predictive Maintenance in Manufacturing,''
+November 2025.
+\url{https://www.alphabold.com/ai-powered-predictive-maintenance-in-manufacturing/}
+
+\bibitem{st2026ew}
+STMicroelectronics,
+``Embedded World 2026: from physical AI to software-defined vehicles,''
+March 2026.
+\url{https://blog.st.com/embedded-world-2026/}
+
+\bibitem{bardes2022vicreg}
+A. Bardes, J. Ponce, and Y. LeCun,
+``VICReg: Variance-Invariance-Covariance Regularization for Self-Supervised Learning,''
+ICLR, 2022.
+
+\bibitem{zbontar2021barlow}
+J. Zbontar, L. Jing, I. Misra, Y. LeCun, and S. Deny,
+``Barlow Twins: Self-Supervised Learning via Redundancy Reduction,''
+ICML, 2021.
+
+
+\end{thebibliography}
+
+\end{document}
